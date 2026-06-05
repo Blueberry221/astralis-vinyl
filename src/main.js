@@ -19,7 +19,7 @@
 // ============================================================================
 const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.tauri?.invoke || async function () {};
 const convertFileSrc = window.__TAURI__?.core?.convertFileSrc || window.__TAURI__?.tauri?.convertFileSrc || ((p) => p);
-
+document.addEventListener("contextmenu", (event) => event.preventDefault());
 document.addEventListener("DOMContentLoaded", async () => {
   // ==========================================================================
   // 2. DATA STRUCTURES
