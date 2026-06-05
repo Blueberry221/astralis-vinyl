@@ -177,7 +177,7 @@ See the [LICENSE](LICENSE) file for more details.
 
 ## 📩 Contact
 
-Created with ❤️ by **Your Full Name / Username**
+Created with ❤️ by **Blueberry221**
 
 * **Email:** [frozendsp@gmail.com](mailto:frozendsp@gmail.com)
 * **GitHub:** https://github.com/Blueberry221
