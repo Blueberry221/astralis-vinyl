@@ -1,20 +1,31 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::fs;
 use std::process::Command;
-use tauri::command;
-use tauri::Manager;
+// [BARU] Import ekstensi khusus Windows untuk memanipulasi terminal
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+use tauri::{command, AppHandle, Manager};
+
+// [BARU] Kode ajaib untuk menyembunyikan terminal di Windows
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// =========================================================
 /// 1. AUDIO SEARCH MODULE
-/// Utilizes yt-dlp ytsearch command to pull JSON metadata
 /// =========================================================
 #[command]
-fn search_song(query: &str) -> Result<String, String> {
-    let mut exe_path = env::current_exe().map_err(|e| e.to_string())?;
-    exe_path.pop(); exe_path.pop(); exe_path.pop(); 
-    exe_path.push("yt-dlp.exe");
+fn search_song(app: AppHandle, query: &str) -> Result<String, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let exe_path = resource_dir.join("bin").join("yt-dlp.exe");
 
-    let output = Command::new(exe_path)
+    let mut cmd = Command::new(exe_path);
+    
+    // [BARU] Sembunyikan terminal saat mencari lagu
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
         .args(&[&format!("ytsearch5:{}", query), "--dump-json", "--no-playlist", "--ignore-errors"])
         .output()
         .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
@@ -28,24 +39,36 @@ fn search_song(query: &str) -> Result<String, String> {
 
 /// =========================================================
 /// 2. CACHE AUDIO DOWNLOAD MODULE
-/// Saves temporary files (Search Result & Recent Playing) 
-/// to the "cache" folder so they can be overwritten
 /// =========================================================
 #[command]
-fn download_audio(video_id: &str) -> Result<String, String> {
-    let mut exe_path = env::current_exe().map_err(|e| e.to_string())?;
-    exe_path.pop(); exe_path.pop(); exe_path.pop(); 
-    exe_path.push("yt-dlp.exe");
+fn download_audio(app: AppHandle, video_id: &str) -> Result<String, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let exe_path = resource_dir.join("bin").join("yt-dlp.exe");
+    let ffmpeg_path = resource_dir.join("bin").join("ffmpeg.exe");
 
-    let current_dir = env::current_dir().unwrap();
-    let cache_dir = current_dir.join("cache");
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let cache_dir = app_data_dir.join("cache");
     let _ = fs::create_dir_all(&cache_dir);
 
     let file_path = cache_dir.join(format!("{}.m4a", video_id));
     let target_url = format!("https://www.youtube.com/watch?v={}", video_id);
 
-    let output = Command::new(exe_path)
-        .args(&["-f", "ba/b", "-o", file_path.to_str().unwrap(), "--extract-audio", "--audio-format", "m4a", "--extractor-args", "youtube:player_client=android,web", &target_url])
+    let mut cmd = Command::new(exe_path);
+    
+    // [BARU] Sembunyikan terminal saat memproses audio
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
+        .args(&[
+            "--ffmpeg-location", ffmpeg_path.to_str().unwrap(),
+            "-f", "ba/b", 
+            "-o", file_path.to_str().unwrap(), 
+            "--extract-audio", 
+            "--audio-format", "m4a", 
+            "--extractor-args", "youtube:player_client=android,web", 
+            &target_url
+        ])
         .output();
 
     match output {
@@ -56,17 +79,15 @@ fn download_audio(video_id: &str) -> Result<String, String> {
 
 /// =========================================================
 /// 3. PERMANENT LIBRARY DOWNLOAD MODULE
-/// Saves files permanently to the "library" folder.
-/// Will bypass download if the file already exists.
 /// =========================================================
 #[command]
-fn save_to_library(video_id: &str) -> Result<String, String> {
-    let mut exe_path = env::current_exe().map_err(|e| e.to_string())?;
-    exe_path.pop(); exe_path.pop(); exe_path.pop(); 
-    exe_path.push("yt-dlp.exe");
+fn save_to_library(app: AppHandle, video_id: &str) -> Result<String, String> {
+    let resource_dir = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let exe_path = resource_dir.join("bin").join("yt-dlp.exe");
+    let ffmpeg_path = resource_dir.join("bin").join("ffmpeg.exe");
 
-    let current_dir = env::current_dir().unwrap();
-    let lib_dir = current_dir.join("library"); 
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let lib_dir = app_data_dir.join("library"); 
     let _ = fs::create_dir_all(&lib_dir);
 
     let file_path = lib_dir.join(format!("{}.m4a", video_id));
@@ -76,8 +97,22 @@ fn save_to_library(video_id: &str) -> Result<String, String> {
         return Ok(file_path.to_string_lossy().to_string());
     }
 
-    let output = Command::new(exe_path)
-        .args(&["-f", "ba/b", "-o", file_path.to_str().unwrap(), "--extract-audio", "--audio-format", "m4a", "--extractor-args", "youtube:player_client=android,web", &target_url])
+    let mut cmd = Command::new(exe_path);
+    
+    // [BARU] Sembunyikan terminal saat mengunduh lagu permanen
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
+        .args(&[
+            "--ffmpeg-location", ffmpeg_path.to_str().unwrap(),
+            "-f", "ba/b", 
+            "-o", file_path.to_str().unwrap(), 
+            "--extract-audio", 
+            "--audio-format", "m4a", 
+            "--extractor-args", "youtube:player_client=android,web", 
+            &target_url
+        ])
         .output();
 
     match output {
@@ -86,85 +121,54 @@ fn save_to_library(video_id: &str) -> Result<String, String> {
     }
 }
 
-use std::{env, fs};
-
 /// =========================================================
 /// 4. DATABASE MANAGER MODULE
 /// =========================================================
-
 #[command]
-fn load_db() -> String {
-
-    let runtime_dir =
-        env::current_dir()
-            .unwrap()
-            .join("runtime");
-
+fn load_db(app: AppHandle) -> Result<String, String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let runtime_dir = app_data_dir.join("runtime");
     let _ = fs::create_dir_all(&runtime_dir);
 
-    let db_path =
-        runtime_dir.join("database.json");
+    let db_path = runtime_dir.join("database.json");
 
     if db_path.exists() {
-
-        fs::read_to_string(db_path)
-            .unwrap_or_else(|_| "[]".to_string())
-
+        Ok(fs::read_to_string(db_path).unwrap_or_else(|_| "[]".to_string()))
     } else {
-
-        let default_db =
-r#"[{"id":"downloaded","name":"Downloaded","desc":"Permanently downloaded songs","songs":[]}]"#;
-
+        let default_db = r#"[{"id":"downloaded","name":"Downloaded","desc":"Permanently downloaded songs","songs":[]}]"#;
         let _ = fs::write(&db_path, default_db);
-
-        default_db.to_string()
+        Ok(default_db.to_string())
     }
 }
 
 #[command]
-fn save_db(data: &str) -> Result<(), String> {
-
-    let runtime_dir =
-        env::current_dir()
-            .unwrap()
-            .join("runtime");
-
+fn save_db(app: AppHandle, data: &str) -> Result<(), String> {
+    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let runtime_dir = app_data_dir.join("runtime");
     let _ = fs::create_dir_all(&runtime_dir);
 
-    let db_path =
-        runtime_dir.join("database.json");
+    let db_path = runtime_dir.join("database.json");
 
-    fs::write(db_path, data)
-        .map_err(|e| e.to_string())
+    fs::write(db_path, data).map_err(|e| e.to_string())
 }
 
 /// =========================================================
 /// 5. MAIN ENTRY POINT
 /// =========================================================
 fn main() {
-
     tauri::Builder::default()
-
         .setup(|app| {
-
-            let window =
-                app.get_webview_window("main").unwrap();
-
+            let window = app.get_webview_window("main").unwrap();
             let _ = window.maximize();
-
             Ok(())
         })
-
-        .invoke_handler(
-            tauri::generate_handler![
-                search_song,
-                download_audio,
-                save_to_library,
-                load_db,
-                save_db
-            ]
-        )
-
+        .invoke_handler(tauri::generate_handler![
+            search_song,
+            download_audio,
+            save_to_library,
+            load_db,
+            save_db
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
