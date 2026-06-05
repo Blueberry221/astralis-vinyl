@@ -1,4 +1,3 @@
-````markdown
 # 🎧 Astralis Vinyl
 
 An aesthetic, lightweight, and advanced **Cosmic Vintage** themed Desktop Music Player. Built using the power of **Tauri** (Rust + Web Frontend) for seamless YouTube integration and high performance.
@@ -103,8 +102,6 @@ Run the following command in your terminal:
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ````
-
----
 
 ## 🚀 Setup & Run
 

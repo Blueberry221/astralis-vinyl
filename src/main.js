@@ -204,11 +204,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         document.getElementById("np-artist").textContent = artist;
 
         // Push to Recent History
-        if (STATE.playContext !== "search") {
-          DATABASE.recentSongs = DATABASE.recentSongs.filter((s) => s.id !== song.id);
-          DATABASE.recentSongs.unshift(song);
-          if (DATABASE.recentSongs.length > 20) DATABASE.recentSongs.pop();
-        }
+        DATABASE.recentSongs = DATABASE.recentSongs.filter((s) => s.id !== song.id);
+        DATABASE.recentSongs.unshift(song);
+        if (DATABASE.recentSongs.length > 10) DATABASE.recentSongs.pop();
+
+        localStorage.setItem("astralis_recent", JSON.stringify(DATABASE.recentSongs));
       } catch (error) {
         document.getElementById("np-artist").textContent = "❌ Failed to play";
         console.error(error);
@@ -505,17 +505,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   let volumeClickCount = 0;
 
   DOM.volumeBtn.addEventListener("click", (e) => {
-    e.stopPropagation(); 
+    e.stopPropagation();
     volumeClickCount++;
 
     if (volumeClickCount === 1) {
       volumeClickTimeout = setTimeout(() => {
         DOM.volumeContainer.classList.toggle("active");
         volumeClickCount = 0;
-      }, 250); 
-    } 
-    else if (volumeClickCount === 2) {
-      clearTimeout(volumeClickTimeout); 
+      }, 250);
+    } else if (volumeClickCount === 2) {
+      clearTimeout(volumeClickTimeout);
       volumeClickCount = 0;
 
       if (DOM.audio.volume > 0) {
@@ -539,7 +538,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       DOM.volumeIcon.src = "assets/no-volume.png";
     } else {
       DOM.volumeIcon.src = "assets/max-volume.png";
-      STATE.previousVolume = DOM.audio.volume; 
+      STATE.previousVolume = DOM.audio.volume;
     }
   });
 
@@ -796,6 +795,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.getElementById("reset-bg-btn").style.display = "none";
     bgInput.value = "";
   });
+
+  // Load song history from localStorage
+  const savedRecent = localStorage.getItem("astralis_recent");
+  if (savedRecent) DATABASE.recentSongs = JSON.parse(savedRecent);
 
   // Init Async Context
   try {
