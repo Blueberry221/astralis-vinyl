@@ -179,8 +179,8 @@ See the [LICENSE](LICENSE) file for more details.
 
 Created with ❤️ by **Your Full Name / Username**
 
-* **Email:** [your.email@domain.com](mailto:your.email@domain.com)
-* **GitHub:** https://github.com/your-username
+* **Email:** [frozendsp@gmail.com](mailto:frozendsp@gmail.com)
+* **GitHub:** https://github.com/Blueberry221
 
 ---
 
