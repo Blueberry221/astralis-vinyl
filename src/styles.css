@@ -1,0 +1,650 @@
+/**
+ * ============================================================================
+ * ASTRALIS VINYL - CORE STYLESHEET
+ * ============================================================================
+ * Theme: Cosmic Vintage (Glassmorphism)
+ * * Architecture Overview:
+ * 1. Variables & Global Resets
+ * 2. Glassmorphism Utility Classes
+ * 3. Base App Layout
+ * 4. Left Panel Components (Clock, Now Playing, Vinyl, Controls)
+ * 5. Right Panel Components (Navigation, Content Views, Song Cards)
+ * 6. Sub-Page Views (Playlist Hero Detail)
+ * 7. Modals & Overlays
+ * 8. Visual Decorators (Particles & Effects)
+ * ============================================================================
+ */
+
+/**
+ * ============================================================================
+ * 1. VARIABLES & GLOBAL RESETS
+ * ============================================================================
+ * Defines the core color palette, fonts, and resets default browser margins.
+ */
+:root {
+  --bg-home: #f4f3ee;
+  --bg-search: #f0f0ea;
+  --bg-playlist: #ecece6;
+  --bg-color: var(--bg-home);
+
+  --text-primary: #2b2d42;
+  --accent-color: #8d99ae;
+  --accent-dark: #6b7a94;
+  --gold-detail: #c8ad7f;
+
+  --font-main: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+  font-family: var(--font-main);
+  overflow: hidden;
+  transition: background-color 0.8s ease-in-out;
+  position: relative;
+}
+
+/* Custom Background Blending Layer */
+body::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-image: var(--custom-bg, none);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 0.15;
+  z-index: -1;
+  pointer-events: none;
+  transition: background-image 0.5s ease;
+}
+
+/**
+ * ============================================================================
+ * 2. GLASSMORPHISM UTILITY CLASSES
+ * ============================================================================
+ * Reusable frosted-glass effects applied to various containers.
+ */
+.glass-panel {
+  background-color: rgba(244, 243, 238, 0.65);
+  backdrop-filter: blur(8px);
+  border-radius: 20px;
+  border: 2px solid rgba(141, 153, 174, 0.4);
+  box-shadow: 0 10px 30px rgba(43, 45, 66, 0.1);
+}
+
+.glass-panel-right {
+  background-color: rgba(244, 243, 238, 0.75);
+  backdrop-filter: blur(10px);
+  border-radius: 25px;
+  border: 2px solid rgba(141, 153, 174, 0.3);
+  box-shadow: 0 10px 30px rgba(43, 45, 66, 0.08);
+}
+
+.glass-panel-controls {
+  background-color: rgba(244, 243, 238, 0.2);
+  backdrop-filter: blur(6px);
+  border-radius: 30px;
+  border: 1px solid rgba(141, 153, 174, 0.2);
+  box-shadow: 0 8px 24px rgba(43, 45, 66, 0.04);
+}
+
+/* Universal Base Icon Sizing */
+button img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+/**
+ * ============================================================================
+ * 3. BASE APP LAYOUT
+ * ============================================================================
+ * Defines the main split-screen grid structure.
+ */
+.app-container {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Left Section: 45% Width (Player Area) */
+.player-section {
+  flex: 0.45;
+  position: relative;
+  border-right: 6px solid rgba(141, 153, 174, 0.5);
+  overflow: hidden;
+}
+
+/* Vignette shadow over the player section */
+.player-section::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at center, transparent 30%, rgba(0, 0, 0, 0.08));
+  pointer-events: none;
+}
+
+/* Right Section: 55% Width (Content Area) */
+.content-section {
+  flex: 0.55;
+  padding: 40px;
+  display: flex;
+  flex-direction: column;
+}
+
+/**
+ * ============================================================================
+ * 4. LEFT PANEL COMPONENTS
+ * ============================================================================
+ * Contains Station Clock, Now Playing Meta, Vinyl Animation, and Media Controls.
+ */
+
+/* --- 4.1 Dot Matrix Clock & Quotes --- */
+.clock-quotes-wrapper {
+  position: absolute; 
+  top: 40px; 
+  left: 40px;
+  width: 280px; 
+  padding: 25px !important;
+  display: flex; 
+  flex-direction: column; 
+  align-items: center;
+  gap: 15px;
+}
+
+.dot-matrix-screen {
+  background: transparent;
+  padding: 0 0 15px 0; 
+  border: none;
+  border-bottom: 1px solid rgba(141, 153, 174, 0.3);
+  text-align: center;
+  width: 100%;
+}
+
+.clock-main {
+  font-family: 'DotGothic16', 'Courier New', Courier, monospace;
+  font-size: 3.2rem; 
+  color: var(--text-primary);
+  line-height: 1; 
+  display: flex; 
+  align-items: flex-end; 
+  justify-content: center;
+  text-shadow: 2px 2px 4px rgba(43, 45, 66, 0.1); 
+  letter-spacing: 2px;
+}
+
+.am-pm-label {
+  font-family: var(--font-main);
+  font-size: 1rem; 
+  margin-left: 8px; 
+  margin-bottom: 6px; 
+  color: var(--gold-detail); 
+  font-weight: bold;
+}
+
+.clock-date {
+  font-family: 'Azeret Mono', 'Consolas', monospace; 
+  font-size: 0.75rem;
+  letter-spacing: 3px; 
+  margin-top: 10px; 
+  color: var(--accent-dark);
+  font-weight: 700; 
+  text-transform: uppercase;
+}
+
+.dot-divider { margin: 0 8px; color: var(--gold-detail); }
+
+.quotes-area {
+  padding: 0 10px; 
+  text-align: center; 
+}
+
+.quote-icon {
+  font-family: Georgia, serif; 
+  font-size: 3rem; 
+  color: var(--gold-detail);
+  opacity: 0.3; 
+  line-height: 0.5; 
+  margin-top: 10px;
+  margin-bottom: 10px;
+}
+
+#quote-text {
+  font-size: 0.9rem; 
+  font-style: italic; 
+  color: var(--text-primary);
+  opacity: 0.85; 
+  line-height: 1.5; 
+  transition: opacity 0.5s ease;
+}
+
+/* --- 4.2 Now Playing Meta Card --- */
+.now-playing-frame {
+  position: absolute;
+  top: 40px;
+  right: 40px;
+  padding: 20px;
+  z-index: 10;
+  width: 280px;
+  height: auto !important; 
+  min-height: 110px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  transition: all 0.3s ease;
+  overflow: visible !important;
+}
+
+/* Wrapper to maintain z-index above particles */
+.np-content {
+  position: relative;
+  z-index: 10; 
+}
+
+.now-playing {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  transition: opacity 0.4s ease-in-out;
+}
+
+.np-cover {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1/1;
+  border-radius: 12px;
+  object-fit: cover;
+  box-shadow: 0 5px 15px rgba(0, 0, 0, 0.15);
+  margin-bottom: 12px;
+}
+
+.np-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.np-title {
+  font-size: 1.4rem;
+  font-weight: bold;
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.np-artist {
+  font-size: 0.9rem;
+  opacity: 0.75;
+  text-transform: uppercase;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  height: 1.2rem;
+}
+
+/* --- 4.3 Vinyl Disk & Progress Ring --- */
+.vinyl-container {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  transform: translate(-50%, 50%);
+  width: 700px;
+  height: 700px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.progress-ring {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 700px;
+  height: 700px;
+  transform: rotate(-90deg);
+}
+
+.progress-ring__track,
+.progress-ring__progress {
+  cx: 350; cy: 350; r: 315;
+  fill: transparent; stroke-width: 12;
+}
+
+.progress-ring__track { stroke: #d3d9ce; opacity: 0.4; }
+
+.progress-ring__progress {
+  stroke: var(--text-primary);
+  stroke-linecap: round;
+  stroke-dasharray: 1979;
+  stroke-dashoffset: 1979;
+  transition: stroke-dashoffset 0.1s linear;
+}
+
+.vinyl-record {
+  position: relative;
+  width: 620px; height: 620px;
+  border-radius: 50%;
+  box-shadow: 0 10px 50px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+  display: flex; justify-content: center; align-items: center;
+}
+
+.vinyl-bg {
+  width: 100%; height: 100%; object-fit: cover;
+  position: absolute; top: 0; left: 0; z-index: 1;
+}
+
+.album-cover {
+  position: absolute; width: 32%; height: 32%;
+  border-radius: 50%; object-fit: cover; z-index: 2;
+}
+
+.vinyl-record.playing { animation: spin 5s linear infinite; }
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* --- 4.4 Hardware Media Controls --- */
+.controls-frame {
+  position: absolute; bottom: 40px; right: 25px;
+  padding: 15px 25px; display: flex; flex-direction: column;
+  align-items: center; z-index: 10;
+}
+
+.time-display-inline {
+  font-weight: bold; font-size: 0.9rem; color: var(--text-primary);
+  margin-bottom: 12px; letter-spacing: 0.5px; opacity: 0.9;
+}
+
+.controls-row { display: flex; align-items: center; gap: 15px; }
+.controls { display: flex; gap: 10px; align-items: center; }
+
+.controls button {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 2px solid var(--accent-color); background-color: transparent;
+  display: flex; justify-content: center; align-items: center;
+  transition: all 0.3s ease;
+}
+
+#prev-btn img, #next-btn img { width: 16px; height: 16px; }
+
+.controls button:hover:not(:disabled) {
+  background-color: var(--accent-color); transform: scale(1.05);
+}
+
+.controls button:disabled {
+  opacity: 0.25; cursor: not-allowed; border-color: #ccc; filter: grayscale(100%);
+}
+
+.volume-hover-container { position: relative; display: flex; align-items: center; }
+
+.volume-trigger-btn {
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 2px solid var(--accent-color); background-color: transparent;
+  display: flex; justify-content: center; align-items: center;
+  transition: all 0.3s ease;
+}
+
+.volume-hover-container.active .volume-trigger-btn { 
+  background-color: var(--accent-color); 
+}
+
+.volume-hover-container.active .volume-popover { 
+  display: flex; 
+}
+
+.volume-popover {
+  position: absolute; bottom: 110%; left: 50%; transform: translateX(-50%);
+  background-color: rgba(244, 243, 238, 0.95); backdrop-filter: blur(5px);
+  padding: 12px 8px; border-radius: 15px; border: 1px solid rgba(141, 153, 174, 0.3);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); display: none; height: 110px;
+  justify-content: center; z-index: 20;
+}
+
+#volume-slider { writing-mode: vertical-lr; direction: rtl; height: 90px; width: 6px; cursor: pointer; accent-color: var(--gold-detail); }
+
+/**
+ * ============================================================================
+ * 5. RIGHT PANEL COMPONENTS
+ * ============================================================================
+ * Contains Top Navigation, Dynamic View Headers, and Song/Folder Cards.
+ */
+
+/* --- 5.1 Top Navigation --- */
+.top-nav-frame { padding: 16px 28px; margin-bottom: 20px; }
+.top-nav { display: flex; justify-content: space-between; align-items: center; }
+.top-nav ul { display: flex; list-style: none; gap: 40px; font-weight: bold; font-size: 1.4rem; }
+.top-nav li { cursor: pointer; padding-bottom: 6px; opacity: 0.4; transition: all 0.3s ease; }
+.top-nav li:hover { opacity: 0.9; transform: translateY(-1px); }
+.top-nav li.active { opacity: 1; border-bottom: 4px solid var(--gold-detail); color: var(--text-primary); }
+
+.theme-controls {
+  display: flex; gap: 10px; background-color: rgba(244, 243, 238, 0.4);
+  padding: 6px 10px; border-radius: 30px; border: 1px solid rgba(141, 153, 174, 0.25); backdrop-filter: blur(4px);
+}
+.theme-btn {
+  background: transparent; border: 1px solid var(--accent-color); border-radius: 50%;
+  width: 38px; height: 38px; cursor: pointer; display: flex; justify-content: center;
+  align-items: center; transition: all 0.3s ease;
+}
+.theme-btn img { width: 16px; height: 16px; }
+.theme-btn:hover { background-color: var(--accent-color); transform: scale(1.05); }
+
+/* --- 5.2 Dynamic View Area --- */
+.view-area { 
+  padding: 35px 40px; display: flex; flex-direction: column; 
+  height: calc(100vh - 165px); overflow: hidden; 
+  transition: opacity 0.4s ease-in-out; 
+}
+.view-title { font-size: 2.4rem; letter-spacing: 1.5px; color: var(--accent-color); flex-shrink: 0; }
+.title-divider { border: none; height: 3px; background-color: var(--accent-color); width: 120px; margin-top: 5px; margin-bottom: 25px; flex-shrink: 0; }
+
+.search-container { display: flex; align-items: center; gap: 14px; margin-bottom: 24px; flex-shrink: 0; }
+.search-input {
+  flex: 1; height: 54px; padding: 0 22px; border-radius: 999px; border: none;
+  background-color: var(--accent-color); color: var(--bg-home); font-weight: bold; font-size: 1rem; outline: none;
+}
+.search-input::placeholder { color: var(--bg-home); opacity: 0.75; }
+
+.search-btn {
+  width: 54px; height: 54px; min-width: 54px; border-radius: 50%; border: none;
+  background-color: var(--text-primary); display: flex; justify-content: center; align-items: center;
+  cursor: pointer; transition: 0.25s ease;
+}
+.search-btn img { filter: brightness(0) invert(1); }
+.search-btn:hover { transform: scale(1.05); background-color: var(--accent-dark); }
+
+.playlist-header-actions { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-shrink: 0; }
+.create-playlist-btn {
+  background-color: var(--text-primary); color: var(--bg-home); border: none;
+  padding: 8px 16px; border-radius: 20px; font-weight: bold; cursor: pointer;
+  transition: all 0.2s ease; display: flex; align-items: center; gap: 8px;
+}
+.create-playlist-btn img { filter: brightness(0) invert(1); width: 14px; height: 14px; }
+.create-playlist-btn:hover { background-color: var(--accent-dark); }
+
+/* --- 5.3 Song Action Cards --- */
+.playlist-container { display: flex; flex-direction: column; gap: 12px; flex: 1; overflow-y: auto; padding-right: 12px; }
+.playlist-container::-webkit-scrollbar { width: 6px; }
+.playlist-container::-webkit-scrollbar-thumb { background-color: var(--accent-color); border-radius: 10px; }
+
+.song-card {
+  display: flex; align-items: center; background-color: var(--accent-color);
+  padding: 14px 20px; border-radius: 15px; color: var(--text-primary); gap: 20px;
+  cursor: pointer; transition: all 0.3s ease;
+}
+.song-card:hover { background-color: var(--accent-dark); transform: translateX(8px); box-shadow: -5px 5px 15px rgba(107, 122, 148, 0.3); }
+.song-card.now-playing-active { background-color: var(--text-primary) !important; border: 1px solid var(--gold-detail); box-shadow: 0 0 12px rgba(43, 45, 66, 0.4); }
+.song-card:hover .song-title, .song-card:hover .song-artist, .song-card.now-playing-active .song-title, .song-card.now-playing-active .song-artist { color: var(--bg-home); }
+
+.song-cover { width: 60px !important; height: 60px !important; min-width: 60px !important; min-height: 60px !important; border-radius: 10px; object-fit: cover; flex-shrink: 0; background-color: var(--accent-dark); }
+.song-info { flex: 1; display: flex; flex-direction: column; }
+.song-title { font-weight: bold; font-size: 1.15rem; letter-spacing: 0.5px; }
+.song-artist { font-size: 0.85rem; text-transform: uppercase; opacity: 0.85; margin-top: 2px; }
+
+.song-actions { opacity: 0; transform: translateX(10px); transition: 0.2s ease; display: flex; gap: 8px; margin-left: auto; padding-left: 10px; }
+.song-card:hover .song-actions { opacity: 1; transform: translateX(0); }
+.song-card:hover .action-btn img { filter: brightness(0) invert(1); }
+
+.action-btn { background: transparent; border: none; cursor: pointer; opacity: 0.6; transition: all 0.2s ease; padding: 4px; display: flex; align-items: center; }
+.action-btn img { width: 22px; height: 22px; }
+.action-btn:hover { opacity: 1; transform: scale(1.15); }
+
+/* --- 5.4 Playlist Folder Cards --- */
+.playlist-folder-card {
+  display: flex; align-items: center; border: 2px dashed var(--accent-color);
+  padding: 18px; border-radius: 15px; gap: 20px; cursor: pointer; transition: all 0.2s ease;
+}
+.playlist-folder-card:hover { background-color: var(--accent-dark); color: var(--bg-home); transform: translateX(6px); }
+
+.folder-icon img { width: 50px; height: 50px; border-radius: 14px; object-fit: cover; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15); }
+.folder-info { display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+.folder-name { font-weight: bold; font-size: 1.15rem; color: var(--text-primary); }
+.folder-desc { font-size: 0.85rem; opacity: 0.75; font-style: italic; }
+
+/**
+ * ============================================================================
+ * 6. SUB-PAGE VIEWS
+ * ============================================================================
+ * Details like the Playlist Hero Header.
+ */
+.playlist-detail-hero { margin-bottom: 24px; }
+.playlist-detail-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 28px; }
+
+.back-btn {
+  background: transparent; border: 2px solid var(--accent-color); color: var(--text-primary);
+  padding: 10px 18px; border-radius: 999px; display: flex; align-items: center; gap: 10px; font-weight: bold; cursor: pointer; transition: 0.25s ease;
+}
+.back-btn img { width: 16px; height: 16px; }
+.back-btn:hover { background: var(--accent-color); color: white; transform: translateY(-2px); }
+
+.playlist-meta {
+  display: flex; gap: 28px; align-items: center; padding: 28px; border-radius: 28px;
+  background: linear-gradient(135deg, rgba(141, 153, 174, 0.18), rgba(141, 153, 174, 0.06));
+  border: 1px solid rgba(141, 153, 174, 0.25); backdrop-filter: blur(8px);
+}
+
+.playlist-cover-large { width: 140px; height: 140px; min-width: 140px; border-radius: 24px; overflow: hidden; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12); }
+.playlist-cover-large img { width: 100%; height: 100%; object-fit: cover; }
+
+.playlist-texts { flex: 1; }
+.playlist-label { font-size: 0.8rem; font-weight: bold; letter-spacing: 2px; opacity: 0.6; }
+.playlist-big-title { font-size: 3.2rem; line-height: 1; margin-top: 6px; margin-bottom: 12px; color: var(--accent-color); }
+.playlist-big-desc { opacity: 0.75; margin-bottom: 18px; max-width: 700px; line-height: 1.6; }
+.playlist-stats { font-size: 0.9rem; font-weight: bold; opacity: 0.7; }
+
+.delete-playlist-btn {
+  background: rgba(255, 0, 0, 0.08); border: 1px solid rgba(255, 0, 0, 0.18); color: #b84d4d;
+  padding: 10px 18px; border-radius: 999px; display: flex; align-items: center; gap: 10px;
+  font-weight: bold; cursor: pointer; transition: 0.25s ease;
+}
+.delete-playlist-btn img { width: 16px; height: 16px; }
+.delete-playlist-btn:hover { background: #b84d4d; color: white; transform: translateY(-2px); }
+.delete-playlist-btn:hover img { filter: brightness(0) invert(1); }
+
+/**
+ * ============================================================================
+ * 7. MODALS & OVERLAYS
+ * ============================================================================
+ * Global overlay wrappers, playlist forms, and confirm prompts.
+ */
+.modal-overlay {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0, 0, 0, 0.4); backdrop-filter: blur(5px);
+  display: flex; justify-content: center; align-items: center; z-index: 100;
+}
+
+.modal-content {
+  background-color: var(--bg-home); padding: 30px; border-radius: 20px; width: 400px;
+  display: flex; flex-direction: column; gap: 15px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); border: 2px solid var(--accent-color);
+}
+.modal-content input, .modal-content textarea {
+  width: 100%; padding: 12px 15px; border-radius: 10px; border: 1px solid var(--accent-color);
+  background-color: transparent; color: var(--text-primary); font-family: var(--font-main); outline: none;
+}
+.modal-content textarea { resize: none; height: 80px; }
+
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px; }
+.modal-actions button { padding: 10px 20px; border-radius: 20px; font-weight: bold; cursor: pointer; border: none; }
+.cancel-btn { background-color: transparent; color: var(--text-primary); border: 1px solid var(--accent-color) !important; transition: all 0.2s ease; }
+.cancel-btn:hover { background-color: var(--text-primary); color: var(--bg-home); transform: scale(1.05); }
+.save-btn { background-color: var(--text-primary); color: var(--bg-home); }
+
+/* Option Lists Inside Modals */
+.playlist-options-container { display: flex; flex-direction: column; gap: 10px; max-height: 200px; overflow-y: auto; padding-right: 5px; }
+.playlist-options-container::-webkit-scrollbar { width: 6px; }
+.playlist-options-container::-webkit-scrollbar-thumb { background-color: var(--accent-color); border-radius: 10px; }
+.playlist-option-btn {
+  background-color: transparent; color: var(--text-primary); border: 2px solid var(--accent-color);
+  padding: 12px 15px; border-radius: 10px; font-weight: bold; font-size: 1rem; cursor: pointer;
+  transition: all 0.2s ease; display: flex; justify-content: space-between; align-items: center;
+}
+.playlist-option-btn:hover { background-color: var(--accent-dark); color: var(--bg-home); }
+.playlist-option-btn.success { background-color: var(--text-primary); color: var(--bg-home); border-color: var(--text-primary); }
+
+/* Custom Confirm Modal */
+.confirm-modal {
+  width: 380px; padding: 32px; border-radius: 28px; background: rgba(244,243,238,0.92);
+  backdrop-filter: blur(10px); border: 1px solid rgba(141,153,174,0.25); box-shadow: 0 20px 60px rgba(0,0,0,0.18); text-align: center;
+}
+.confirm-icon { width: 72px; height: 72px; margin: 0 auto 20px; border-radius: 50%; background: rgba(255,0,0,0.08); display: flex; justify-content: center; align-items: center; }
+.confirm-icon img { width: 30px; height: 30px; }
+.confirm-modal h2 { font-size: 1.6rem; margin-bottom: 10px; color: var(--text-primary); }
+.confirm-modal p { opacity: 0.7; line-height: 1.5; margin-bottom: 28px; }
+.confirm-actions { display: flex; gap: 12px; }
+.confirm-actions button { flex: 1; height: 48px; border-radius: 16px; border: none; font-weight: bold; cursor: pointer; transition: 0.25s ease; }
+.danger-btn { background: #c95c5c; color: white; }
+.danger-btn:hover { transform: translateY(-2px); filter: brightness(1.05); }
+
+/**
+ * ============================================================================
+ * 8. VISUAL DECORATORS
+ * ============================================================================
+ * Contains animations and physics objects (Falling stars, flying notes).
+ */
+
+/* --- 8.1 Star Particles Falling From Meta Card --- */
+.star-container {
+  position: absolute; bottom: 0; left: 0; width: 100%; height: 20px;
+  pointer-events: none; z-index: 1; overflow: visible;
+}
+.falling-star {
+  position: absolute; background-color: #fff; border-radius: 50%;
+  box-shadow: 0 0 8px 2px var(--gold-detail); animation: fall linear forwards;
+}
+@keyframes fall {
+  0% { transform: translateY(0) scale(0.5); opacity: 0; }
+  10% { opacity: 1; transform: translateY(20px) scale(1); }
+  100% { transform: translateY(45vh) scale(0.1); opacity: 0; }
+}
+
+/* --- 8.2 Flying Notes Escaping From Vinyl --- */
+.notes-container {
+  position: absolute; top: 15%; left: 20%; width: 60%; height: 50%;
+  pointer-events: none; z-index: 5; overflow: visible;
+}
+.flying-note {
+  position: absolute; color: var(--text-primary); font-size: 2.5rem;
+  opacity: 0; animation: floatUp linear forwards; text-shadow: 0 0 8px rgba(244, 243, 238, 0.8);
+}
+@keyframes floatUp {
+  0% { transform: translateY(0) scale(0.5) rotate(-10deg); opacity: 0; }
+  20% { opacity: 0.7; }
+  100% { transform: translateY(-180px) scale(1.2) rotate(20deg); opacity: 0; }
+}

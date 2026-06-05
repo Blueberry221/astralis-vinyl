@@ -1,0 +1,5 @@
+# .taurignore
+**/cache/
+library/
+runtime/
+temp_preview_cache/

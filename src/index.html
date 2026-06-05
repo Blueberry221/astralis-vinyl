@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Astralis Vinyl</title>
+    <link rel="icon" href="assets/main.png" />
+    <link rel="stylesheet" href="styles.css" />
+    <link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Azeret+Mono:wght@300;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <main class="app-container">
+      <div id="confirm-modal" class="modal-overlay" style="display: none">
+        <div class="confirm-modal">
+          <div class="confirm-icon">
+            <img src="assets/delete.png" />
+          </div>
+          <h2 id="confirm-title">Remove Song</h2>
+          <p id="confirm-message">Are you sure?</p>
+          <div class="confirm-actions">
+            <button id="confirm-cancel" class="cancel-btn">Cancel</button>
+            <button id="confirm-ok" class="danger-btn">Delete</button>
+          </div>
+        </div>
+      </div>
+      <div id="select-playlist-modal" class="modal-overlay" style="display: none">
+        <div class="modal-content">
+          <h2>Add to Playlist</h2>
+          <div id="playlist-options-container" class="playlist-options-container"></div>
+          <div class="modal-actions">
+            <button id="close-select-modal-btn" class="cancel-btn">Done</button>
+          </div>
+        </div>
+      </div>
+      <div id="playlist-modal" class="modal-overlay" style="display: none">
+        <div class="modal-content">
+          <h2>New Playlist</h2>
+          <input type="text" id="playlist-name-input" placeholder="Playlist Name..." autocomplete="off" />
+          <textarea id="playlist-desc-input" placeholder="Add a short description..."></textarea>
+          <div class="modal-actions">
+            <button id="cancel-playlist-btn" class="cancel-btn">Cancel</button>
+            <button id="save-playlist-btn" class="save-btn">Save</button>
+          </div>
+        </div>
+      </div>
+      <audio id="audio-player" style="display: none"></audio>
+      <section class="player-section">
+        
+        <div class="glass-panel clock-quotes-wrapper">
+          <div class="dot-matrix-screen">
+            <div class="clock-main">
+              <span id="hour-min">00:00</span>
+              <span id="am-pm" class="am-pm-label">AM</span>
+            </div>
+            <div class="clock-date">
+              <span id="day-name">MONDAY</span>
+              <span class="dot-divider">•</span>
+              <span id="date-num">OCT 24</span>
+            </div>
+          </div>
+          
+          <div class="quotes-area">
+            <div class="quote-icon">“</div>
+            <p id="quote-text">Music is the shorthand of emotion.</p>
+          </div>
+        </div>
+        <div class="glass-panel now-playing-frame">
+          <div id="star-container" class="star-container"></div>
+          <div class="np-content">
+            <div class="now-playing">
+              <img src="" alt="NP Cover" class="np-cover" id="np-cover" style="display: none" />
+              <div class="np-details">
+                <div class="np-title" id="np-title">Welcome back~</div>
+                <div class="np-artist" id="np-artist">Astralis Station</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="vinyl-container">
+          <div id="notes-container" class="notes-container"></div>
+          <svg class="progress-ring" width="700" height="700" viewBox="0 0 700 700">
+            <circle class="progress-ring__track" stroke-width="12" fill="transparent" r="315" cx="350" cy="350" />
+            <circle class="progress-ring__progress" stroke-width="12" fill="transparent" r="315" cx="350" cy="350" />
+          </svg>
+          <div class="vinyl-record" id="vinyl">
+            <img src="assets/vinyl.png" alt="Vinyl" class="vinyl-bg" />
+            <img src="" alt="Cover" class="album-cover" id="cover" style="display: none" />
+          </div>
+        </div>
+        <div class="glass-panel-controls controls-frame">
+          <div class="time-display-inline" id="time-display">00:00 / 00:00</div>
+          <div class="controls-row">
+            <div class="controls">
+              <button id="repeat-btn"><img src="assets/repeat.png" alt="Rep"></button>
+              <button id="prev-btn" disabled><img src="assets/previous.png" alt="Prv"></button>
+              <button id="play-pause-btn"><img src="assets/play.png" alt="Play" id="play-icon"></button>
+              <button id="next-btn" disabled><img src="assets/next.png" alt="Nxt"></button>
+            </div>
+            <div class="volume-hover-container">
+              <div class="volume-popover">
+                <input type="range" id="volume-slider" min="0" max="1" step="0.01" value="1">
+              </div>
+              <button class="volume-trigger-btn"><img src="assets/max-volume.png" alt="Vol"></button>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="content-section">
+        <div class="glass-panel-right top-nav-frame">
+          <nav class="top-nav">
+            <ul>
+              <li class="active" data-target="home">HOME</li>
+              <li data-target="search">SEARCH</li>
+              <li data-target="playlist">PLAYLIST</li>
+            </ul>
+            <div class="theme-controls">
+              <input type="file" id="bg-input" accept="image/*" style="display: none" />
+              <button id="change-bg-btn" class="theme-btn" title="Change Background"><img src="assets/image.png" alt="Theme" /></button>
+              <button id="reset-bg-btn" class="theme-btn" title="Reset Background" style="display: none"><img src="assets/close.png" alt="Reset" /></button>
+            </div>
+          </nav>
+        </div>
+        <div id="dynamic-content" class="glass-panel-right view-area"></div>
+      </section>
+    </main>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
