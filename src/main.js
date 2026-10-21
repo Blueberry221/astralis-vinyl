@@ -44,6 +44,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     activeSongToSave: null,
     previousVolume: 1,
     playToken: 0, // Incremented on every play request; stale requests are discarded
+    currentSongId: null, // id of the song currently loaded in the player
+    localIds: new Set(), // ids of permanently downloaded songs (for badges)
   };
 
   /** * Local Session Database
@@ -142,13 +144,23 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Commits the current DATABASE state to Rust backend.
    * @return {Promise<void>}
    */
-  const saveDatabase = async () => {
+  const saveDatabase = async () => { 
     try {
       await invoke("save_db", { data: JSON.stringify(DATABASE.userPlaylists) });
     } catch (err) {
       console.error("Database Save Error:", err);
     }
   };
+
+  /** Reloads the set of permanently downloaded song ids from disk (used for badges). */
+  const refreshLocalIds = async () => {
+    try {
+      STATE.localIds = new Set(await invoke("list_library_ids"));
+    } catch (err) {
+      console.error("Could not read library:", err);
+    }
+  };
+  const DL_BADGE_HTML = `<span class="dl-badge">✓ DOWNLOADED</span>`;
 
   // ==========================================================================
   // 4. AUDIO PROCESSING ENGINE
@@ -158,11 +170,13 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Main execution bridge for loading and playing audio tracks.
    * Handles UI crossfading, metadata extraction, and backend stream calls.
    * @param {Object} song - The song metadata payload.
-   * @param {boolean} isFromLibrary - Flag indicating if track is cached locally.
+   * @param {boolean} isFromLibrary - Unused now: the backend always checks the library,
+   *   then the (non-expired) cache, and only downloads when the song is not on the device.
    */
   async function executePlay(song, isFromLibrary) {
     // Every request gets a token; if a newer request starts, older ones stop silently.
     const token = ++STATE.playToken;
+    STATE.currentSongId = song.id;
 
     // 1. Crossfade Out UI
     DOM.npContainer.style.opacity = 0;
@@ -201,9 +215,13 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // 4. Backend Call & Execution
       try {
-        let absolutePath;
-        if (isFromLibrary) absolutePath = await invoke("save_to_library", { videoId: song.id });
-        else absolutePath = await invoke("download_audio", { videoId: song.id });
+        // Local first: library, then non-expired cache. Download only if it is not on the device.
+        let absolutePath = await invoke("get_local_path", { videoId: song.id });
+        if (!absolutePath) {
+          if (token !== STATE.playToken) return;
+          document.getElementById("np-artist").textContent = "Downloading... ⏳";
+          absolutePath = await invoke("download_audio", { videoId: song.id });
+        }
 
         if (token !== STATE.playToken) return; // user picked another song while this one loaded
 
@@ -408,9 +426,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       let cover = song.thumbnail || song.cover || "";
       if (!cover && song.thumbnails && song.thumbnails.length > 0) cover = song.thumbnails[song.thumbnails.length - 1].url;
 
+      const isDownloaded = STATE.localIds.has(song.id);
+      const showBadge = isDownloaded && !(viewContext === "playlist" && playlistId === "downloaded");
+
       let actionButtonsHTML = "";
       if (viewContext === "search") {
-        actionButtonsHTML = `<button class="action-btn download-btn"><img src="assets/download.png"></button><button class="action-btn add-btn"><img src="assets/more.png"></button>`;
+        actionButtonsHTML = `<button class="action-btn download-btn"><img src="assets/${isDownloaded ? "check" : "download"}.png"></button><button class="action-btn add-btn"><img src="assets/more.png"></button>`;
       } else if (viewContext === "home") {
         actionButtonsHTML = `<button class="action-btn add-btn"><img src="assets/more.png"></button>`;
       } else {
@@ -425,16 +446,22 @@ document.addEventListener("DOMContentLoaded", async () => {
         <div class="song-info">
           <span class="song-title">${esc(title)}</span>
           <span class="song-artist">${esc(artist)}</span>
+          ${showBadge ? DL_BADGE_HTML : ""}
         </div>
         <div class="song-actions">${actionButtonsHTML}</div>
       `;
 
+      // Hide the cover if the image fails to load (inline onerror is blocked by the CSP)
       card.querySelector(".song-cover").addEventListener("error", (e) => (e.target.style.display = "none"));
+
       // -- CARD ACTIONS BINDING --
       const dlBtn = card.querySelector(".download-btn");
-      if (dlBtn)
+      if (dlBtn) {
+        if (isDownloaded) dlBtn.dataset.done = "1";
         dlBtn.onclick = async (e) => {
           e.stopPropagation();
+          if (dlBtn.dataset.done || dlBtn.dataset.busy) return; // already saved / in progress
+          dlBtn.dataset.busy = "1";
           dlBtn.innerHTML = "⏳";
           try {
             await invoke("save_to_library", { videoId: song.id });
@@ -448,11 +475,18 @@ document.addEventListener("DOMContentLoaded", async () => {
               dlPlaylist.songs.push(song);
               await saveDatabase();
             }
+            STATE.localIds.add(song.id);
+            dlBtn.dataset.done = "1";
             dlBtn.innerHTML = `<img src="assets/check.png">`;
+            if (!card.querySelector(".dl-badge")) card.querySelector(".song-info").insertAdjacentHTML("beforeend", DL_BADGE_HTML);
           } catch (err) {
-            dlBtn.innerHTML = "❌";
+            console.error(err);
+            dlBtn.innerHTML = "❌"; // click again to retry
+          } finally {
+            delete dlBtn.dataset.busy;
           }
         };
+      }
 
       const addBtn = card.querySelector(".add-btn");
       if (addBtn)
@@ -486,26 +520,43 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (delBtn)
         delBtn.onclick = async (e) => {
           e.stopPropagation();
-          if (await customConfirm("Remove Song", `Remove "${title}" from this playlist?`)) {
-            const target = DATABASE.userPlaylists.find((p) => p.id === playlistId);
-            if (target) {
-              target.songs = target.songs.filter((s) => s.id !== song.id);
-              await saveDatabase();
-              card.remove();
-              if (STATE.currentQueue[STATE.currentSongIndex]?.id === song.id) {
-                STATE.playToken++; // cancel any in-flight load for this song
-                DOM.audio.pause();
-                DOM.audio.removeAttribute("src");
-                DOM.audio.load();
-                STATE.currentQueue = [];
-                STATE.currentSongIndex = -1;
-                DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
-                DOM.timeDisplay.textContent = "00:00 / 00:00";
-                document.getElementById("np-title").textContent = "Welcome back~";
-                document.getElementById("np-artist").textContent = "Astralis Station";
-                document.getElementById("np-cover").style.display = "none";
-                document.getElementById("cover").style.display = "none";
-              }
+          const fromDownloads = playlistId === "downloaded";
+          const ok = await customConfirm(
+            fromDownloads ? "Delete Download" : "Remove Song",
+            fromDownloads ? `Delete "${title}" from your device?` : `Remove "${title}" from this playlist?`
+          );
+          if (!ok) return;
+
+          const target = DATABASE.userPlaylists.find((p) => p.id === playlistId);
+          if (!target) return;
+          target.songs = target.songs.filter((s) => s.id !== song.id);
+          await saveDatabase();
+          card.remove();
+
+          // Stop and release the file first if this song is the one currently loaded
+          if (STATE.currentSongId === song.id) {
+            STATE.playToken++; // cancel any in-flight load for this song
+            STATE.currentSongId = null;
+            DOM.audio.pause();
+            DOM.audio.removeAttribute("src");
+            DOM.audio.load();
+            STATE.currentQueue = [];
+            STATE.currentSongIndex = -1;
+            DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
+            DOM.timeDisplay.textContent = "00:00 / 00:00";
+            document.getElementById("np-title").textContent = "Welcome back~";
+            document.getElementById("np-artist").textContent = "Astralis Station";
+            document.getElementById("np-cover").style.display = "none";
+            document.getElementById("cover").style.display = "none";
+          }
+
+          // Removing from "Downloaded" also deletes the audio file from disk
+          if (fromDownloads) {
+            try {
+              await invoke("delete_from_library", { videoId: song.id });
+              STATE.localIds.delete(song.id);
+            } catch (err) {
+              console.error("Could not delete the file:", err);
             }
           }
         };
@@ -856,6 +907,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (!DATABASE.userPlaylists.some((p) => p.id === "downloaded")) {
     DATABASE.userPlaylists.unshift({ id: "downloaded", name: "Downloaded", desc: "Permanently downloaded songs", songs: [] });
   }
+
+  await refreshLocalIds();
 
   DOM.navItems.forEach((nav) => nav.classList.remove("active"));
   document.querySelector('[data-target="home"]').classList.add("active");

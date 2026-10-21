@@ -686,3 +686,18 @@ button img {
   .view-area { padding: 28px; height: calc(100vh - 135px); }
   .view-title { font-size: 2rem; }
 }
+
+/* "Downloaded" badge on song cards */
+.dl-badge {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: bold;
+  letter-spacing: 1.5px;
+  color: #e8d3a8;
+  background: rgba(43, 45, 66, 0.85);
+  border: 1px solid var(--gold-detail);
+}
+.download-btn[data-done] { opacity: 1; }
