@@ -19,7 +19,14 @@
 // ============================================================================
 const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.tauri?.invoke || async function () {};
 const convertFileSrc = window.__TAURI__?.core?.convertFileSrc || window.__TAURI__?.tauri?.convertFileSrc || ((p) => p);
-document.addEventListener("contextmenu", (event) => event.preventDefault());
+// Block the native context menu, except inside text fields (so paste still works)
+document.addEventListener("contextmenu", (event) => {
+  if (!event.target.closest("input, textarea")) event.preventDefault();
+});
+
+/** Escapes text before it is placed inside innerHTML (prevents broken UI / injection). */
+const esc = (value) =>
+  String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 document.addEventListener("DOMContentLoaded", async () => {
   // ==========================================================================
   // 2. DATA STRUCTURES
@@ -36,6 +43,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     currentPlaylistId: null,
     activeSongToSave: null,
     previousVolume: 1,
+    playToken: 0, // Incremented on every play request; stale requests are discarded
   };
 
   /** * Local Session Database
@@ -153,6 +161,9 @@ document.addEventListener("DOMContentLoaded", async () => {
    * @param {boolean} isFromLibrary - Flag indicating if track is cached locally.
    */
   async function executePlay(song, isFromLibrary) {
+    // Every request gets a token; if a newer request starts, older ones stop silently.
+    const token = ++STATE.playToken;
+
     // 1. Crossfade Out UI
     DOM.npContainer.style.opacity = 0;
 
@@ -163,11 +174,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     // 2. Wait for CSS transition sync (400ms)
     setTimeout(async () => {
+      if (token !== STATE.playToken) return; // a newer song was requested meanwhile
       DOM.audio.pause();
-      DOM.audio.src = "";
-      STATE.isPlaying = false;
-      DOM.vinyl.classList.remove("playing");
-      DOM.iconPlay.src = "assets/play.png";
+      DOM.audio.removeAttribute("src");
+      DOM.audio.load();
       DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
       DOM.timeDisplay.textContent = "00:00 / 00:00";
 
@@ -195,12 +205,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (isFromLibrary) absolutePath = await invoke("save_to_library", { videoId: song.id });
         else absolutePath = await invoke("download_audio", { videoId: song.id });
 
+        if (token !== STATE.playToken) return; // user picked another song while this one loaded
+
         DOM.audio.src = convertFileSrc(absolutePath);
         await DOM.audio.play();
+        if (token !== STATE.playToken) return;
 
-        STATE.isPlaying = true;
-        DOM.vinyl.classList.add("playing");
-        DOM.iconPlay.src = "assets/pause.png";
+        // isPlaying / vinyl / play icon are updated by the audio "play" event listener
         document.getElementById("np-artist").textContent = artist;
 
         // Push to Recent History
@@ -210,6 +221,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
         localStorage.setItem("astralis_recent", JSON.stringify(DATABASE.recentSongs));
       } catch (error) {
+        if (token !== STATE.playToken) return; // ignore errors from superseded requests
         document.getElementById("np-artist").textContent = "❌ Failed to play";
         console.error(error);
       }
@@ -255,8 +267,8 @@ document.addEventListener("DOMContentLoaded", async () => {
           folder.innerHTML = `
             <div class="folder-icon"><img src="assets/icon.jpg" alt="Dir"></div>
             <div class="folder-info">
-              <span class="folder-name">${pl.name} <span style="font-size:0.8rem; font-weight:normal;">(${pl.songs.length} songs)</span></span>
-              <span class="folder-desc">${pl.desc}</span>
+              <span class="folder-name">${esc(pl.name)} <span style="font-size:0.8rem; font-weight:normal;">(${pl.songs.length} songs)</span></span>
+              <span class="folder-desc">${esc(pl.desc)}</span>
             </div>
           `;
           folder.onclick = () => renderPlaylistDetail(pl.id);
@@ -298,11 +310,23 @@ document.addEventListener("DOMContentLoaded", async () => {
           container.innerHTML = `<p style="text-align:center;">Searching... ⏳</p>`;
           try {
             const raw = await invoke("search_song", { query: q });
+            // Parse line by line: one malformed line must not break the whole search
             const res = raw
               .trim()
               .split("\n")
-              .filter((l) => l)
-              .map(JSON.parse);
+              .filter((l) => l.trim())
+              .map((l) => {
+                try {
+                  return JSON.parse(l);
+                } catch {
+                  return null;
+                }
+              })
+              .filter((s) => s && s.id);
+            if (res.length === 0) {
+              container.innerHTML = `<p style="opacity:0.7; font-style:italic;">No results found.</p>`;
+              return;
+            }
             renderPlaylistCards(res, container, "search");
           } catch (e) {
             container.innerHTML = `<p style="color:red;text-align:center;">Failed to search.</p>`;
@@ -336,8 +360,8 @@ document.addEventListener("DOMContentLoaded", async () => {
             <div class="playlist-cover-large"><img src="assets/icon.jpg"></div>
             <div class="playlist-texts">
               <span class="playlist-label">PLAYLIST</span>
-              <h1 class="playlist-big-title">${playlist.name}</h1>
-              <p class="playlist-big-desc">${playlist.desc || "No description."}</p>
+              <h1 class="playlist-big-title">${esc(playlist.name)}</h1>
+              <p class="playlist-big-desc">${esc(playlist.desc) || "No description."}</p>
               <div class="playlist-stats">${playlist.songs.length} songs</div>
             </div>
           </div>
@@ -350,7 +374,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       const deletePlaylistBtn = document.getElementById("delete-playlist-btn");
       if (deletePlaylistBtn) {
         deletePlaylistBtn.onclick = async () => {
-          const confirmDelete = await customConfirm("Delete Playlist", `Delete playlist '${playlist.name}' permanently?`);
+          const confirmDelete = await customConfirm("Delete Playlist", `Delete playlist '${playlist.name}' permanently?`); // customConfirm uses textContent, safe
           if (!confirmDelete) return;
           DATABASE.userPlaylists = DATABASE.userPlaylists.filter((p) => p.id !== playlist.id);
           await saveDatabase();
@@ -397,14 +421,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       card.className = "song-card";
       card.id = `card-${song.id}`;
       card.innerHTML = `
-        <img src="${cover}" class="song-cover" onerror="this.style.display='none'">
+        <img src="${esc(cover)}" class="song-cover">
         <div class="song-info">
-          <span class="song-title">${title}</span>
-          <span class="song-artist">${artist}</span>
+          <span class="song-title">${esc(title)}</span>
+          <span class="song-artist">${esc(artist)}</span>
         </div>
         <div class="song-actions">${actionButtonsHTML}</div>
       `;
 
+      card.querySelector(".song-cover").addEventListener("error", (e) => (e.target.style.display = "none"));
       // -- CARD ACTIONS BINDING --
       const dlBtn = card.querySelector(".download-btn");
       if (dlBtn)
@@ -413,7 +438,12 @@ document.addEventListener("DOMContentLoaded", async () => {
           dlBtn.innerHTML = "⏳";
           try {
             await invoke("save_to_library", { videoId: song.id });
-            const dlPlaylist = DATABASE.userPlaylists.find((p) => p.id === "downloaded");
+            let dlPlaylist = DATABASE.userPlaylists.find((p) => p.id === "downloaded");
+            if (!dlPlaylist) {
+              // Self-heal: recreate the system playlist if it is missing from the DB
+              dlPlaylist = { id: "downloaded", name: "Downloaded", desc: "Permanently downloaded songs", songs: [] };
+              DATABASE.userPlaylists.unshift(dlPlaylist);
+            }
             if (!dlPlaylist.songs.some((s) => s.id === song.id)) {
               dlPlaylist.songs.push(song);
               await saveDatabase();
@@ -436,14 +466,14 @@ document.addEventListener("DOMContentLoaded", async () => {
               const isAdded = pl.songs.some((s) => s.id === song.id);
               const btn = document.createElement("button");
               btn.className = "playlist-option-btn";
-              btn.innerHTML = `<span><img src="assets/icon.jpg" style="width:16px; margin-right:8px; vertical-align:middle;"> ${pl.name}</span> <img src="assets/${isAdded ? "check" : "more"}.png">`;
+              btn.innerHTML = `<span><img src="assets/icon.jpg" style="width:16px; margin-right:8px; vertical-align:middle;"> ${esc(pl.name)}</span> <img src="assets/${isAdded ? "check" : "more"}.png">`;
               if (isAdded) btn.classList.add("success");
               btn.onclick = async () => {
                 if (!pl.songs.some((s) => s.id === song.id)) {
                   pl.songs.push(STATE.activeSongToSave);
                   await saveDatabase();
                   btn.classList.add("success");
-                  btn.innerHTML = `<span><img src="assets/icon.jpg" style="width:16px; margin-right:8px; vertical-align:middle;"> ${pl.name}</span> <img src="assets/check.png">`;
+                  btn.innerHTML = `<span><img src="assets/icon.jpg" style="width:16px; margin-right:8px; vertical-align:middle;"> ${esc(pl.name)}</span> <img src="assets/check.png">`;
                 }
               };
               optionsContainer.appendChild(btn);
@@ -463,10 +493,18 @@ document.addEventListener("DOMContentLoaded", async () => {
               await saveDatabase();
               card.remove();
               if (STATE.currentQueue[STATE.currentSongIndex]?.id === song.id) {
+                STATE.playToken++; // cancel any in-flight load for this song
                 DOM.audio.pause();
-                DOM.audio.src = "";
-                DOM.iconPlay.src = "assets/play.png";
-                DOM.vinyl.classList.remove("playing");
+                DOM.audio.removeAttribute("src");
+                DOM.audio.load();
+                STATE.currentQueue = [];
+                STATE.currentSongIndex = -1;
+                DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
+                DOM.timeDisplay.textContent = "00:00 / 00:00";
+                document.getElementById("np-title").textContent = "Welcome back~";
+                document.getElementById("np-artist").textContent = "Astralis Station";
+                document.getElementById("np-cover").style.display = "none";
+                document.getElementById("cover").style.display = "none";
               }
             }
           }
@@ -549,18 +587,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   DOM.btnPlay.addEventListener("click", () => {
-    if (!DOM.audio.src) return;
-    if (DOM.audio.paused) {
-      DOM.audio.play();
-      STATE.isPlaying = true;
-      DOM.vinyl.classList.add("playing");
-      DOM.iconPlay.src = "assets/pause.png";
-    } else {
-      DOM.audio.pause();
-      STATE.isPlaying = false;
-      DOM.vinyl.classList.remove("playing");
-      DOM.iconPlay.src = "assets/play.png";
-    }
+    if (!DOM.audio.getAttribute("src")) return;
+    // UI state is updated by the audio "play" / "pause" listeners below
+    if (DOM.audio.paused) DOM.audio.play().catch(console.error);
+    else DOM.audio.pause();
+  });
+
+  // Single source of truth for play state: the <audio> element's own events
+  const syncPlayingUI = (playing) => {
+    STATE.isPlaying = playing;
+    DOM.vinyl.classList.toggle("playing", playing);
+    DOM.iconPlay.src = playing ? "assets/pause.png" : "assets/play.png";
+  };
+  DOM.audio.addEventListener("play", () => syncPlayingUI(true));
+  DOM.audio.addEventListener("pause", () => syncPlayingUI(false));
+  DOM.audio.addEventListener("error", () => {
+    if (!DOM.audio.getAttribute("src")) return; // we cleared it ourselves
+    syncPlayingUI(false);
+    document.getElementById("np-artist").textContent = "❌ Failed to play";
   });
 
   DOM.btnNext.addEventListener("click", () => {
@@ -618,7 +662,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   DOM.audio.addEventListener("ended", () => {
     if (STATE.repeatMode === "one") {
       DOM.audio.currentTime = 0;
-      DOM.audio.play();
+      DOM.audio.play().catch(console.error);
     } else if (STATE.playContext !== "search" && STATE.currentQueue.length > 0) {
       let nextIndex = STATE.currentSongIndex + 1;
       if (nextIndex >= STATE.currentQueue.length) {
@@ -626,9 +670,6 @@ document.addEventListener("DOMContentLoaded", async () => {
           STATE.currentSongIndex = 0;
           executePlay(STATE.currentQueue[0], STATE.currentPlaylistId === "downloaded");
         } else {
-          STATE.isPlaying = false;
-          DOM.vinyl.classList.remove("playing");
-          DOM.iconPlay.src = "assets/play.png";
           DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
         }
       } else {
@@ -636,16 +677,13 @@ document.addEventListener("DOMContentLoaded", async () => {
         executePlay(STATE.currentQueue[nextIndex], STATE.currentPlaylistId === "downloaded");
       }
     } else {
-      STATE.isPlaying = false;
-      DOM.vinyl.classList.remove("playing");
-      DOM.iconPlay.src = "assets/play.png";
       DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
     }
   });
 
   /** Scrubbing Vinyl Seek Mechanism */
   const handleSeek = (e) => {
-    if (!DOM.audio.src || DOM.audio.duration === 0) return;
+    if (!DOM.audio.getAttribute("src") || !DOM.audio.duration) return;
     const rect = DOM.vinylContainer.getBoundingClientRect();
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
@@ -655,6 +693,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     DOM.audio.currentTime = DOM.audio.duration * percent;
   };
   DOM.vinylContainer.addEventListener("mousedown", (e) => {
+    e.preventDefault(); // stops text/image selection while dragging on the vinyl
     handleSeek(e);
     const onMouseMove = (ev) => handleSeek(ev);
     document.addEventListener("mousemove", onMouseMove);
@@ -797,8 +836,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // Load song history from localStorage
-  const savedRecent = localStorage.getItem("astralis_recent");
-  if (savedRecent) DATABASE.recentSongs = JSON.parse(savedRecent);
+  // A corrupted value must not stop the app from starting
+  try {
+    const parsed = JSON.parse(localStorage.getItem("astralis_recent") || "[]");
+    DATABASE.recentSongs = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    DATABASE.recentSongs = [];
+  }
 
   // Init Async Context
   try {
@@ -806,6 +850,11 @@ document.addEventListener("DOMContentLoaded", async () => {
     DATABASE.userPlaylists = JSON.parse(dbRaw);
   } catch (error) {
     console.error("DB Load Error:", error);
+  }
+  // The "Downloaded" system playlist must always exist
+  if (!Array.isArray(DATABASE.userPlaylists)) DATABASE.userPlaylists = [];
+  if (!DATABASE.userPlaylists.some((p) => p.id === "downloaded")) {
+    DATABASE.userPlaylists.unshift({ id: "downloaded", name: "Downloaded", desc: "Permanently downloaded songs", songs: [] });
   }
 
   DOM.navItems.forEach((nav) => nav.classList.remove("active"));

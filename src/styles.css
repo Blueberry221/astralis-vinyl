@@ -50,6 +50,23 @@ body {
   position: relative;
 }
 
+/* Desktop-app feel: no blue text selection or image dragging */
+html, body {
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+img {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+button, .song-card, .playlist-folder-card, .top-nav li { cursor: pointer; }
+
 /* Custom Background Blending Layer */
 body::before {
   content: "";
@@ -354,7 +371,9 @@ button img {
   border-radius: 50%; object-fit: cover; z-index: 2;
 }
 
-.vinyl-record.playing { animation: spin 5s linear infinite; }
+/* Always "spinning", but paused in place so it never snaps back to 0deg */
+.vinyl-record { animation: spin 5s linear infinite; animation-play-state: paused; }
+.vinyl-record.playing { animation-play-state: running; }
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
@@ -647,4 +666,23 @@ button img {
   0% { transform: translateY(0) scale(0.5) rotate(-10deg); opacity: 0; }
   20% { opacity: 0.7; }
   100% { transform: translateY(-180px) scale(1.2) rotate(20deg); opacity: 0; }
+}
+
+/* ===== Medium windows (1200px - 1500px): shrink the left panels so they never overlap ===== */
+@media (max-width: 1500px) {
+  .clock-quotes-wrapper { width: 230px; left: 24px; top: 24px; padding: 18px !important; }
+  .clock-main { font-size: 2.4rem; }
+  .am-pm-label { font-size: 0.8rem; }
+  .clock-date { letter-spacing: 2px; font-size: 0.65rem; }
+  #quote-text { font-size: 0.8rem; }
+  .now-playing-frame { width: 230px; right: 24px; top: 24px; padding: 16px; }
+  .np-title { font-size: 1.15rem; }
+  .controls-frame { right: 16px; bottom: 24px; padding: 12px 16px; }
+
+  .content-section { padding: 24px; }
+  .top-nav-frame { padding: 12px 20px; }
+  .top-nav ul { gap: 22px; font-size: 1.1rem; }
+  .theme-controls { flex-shrink: 0; }
+  .view-area { padding: 28px; height: calc(100vh - 135px); }
+  .view-title { font-size: 2rem; }
 }
