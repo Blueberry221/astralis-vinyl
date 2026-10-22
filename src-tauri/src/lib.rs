@@ -1,8 +1,8 @@
 // <<PURE-START>>
-// Everything between PURE-START and PURE-END uses only the standard library
-// (no Tauri), so the file / cache logic can be unit-tested on its own.
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 /// A cached (temporary) song is deleted when it has not been played for this long.
@@ -227,16 +227,79 @@ fn search_args(query: &str, source: &str) -> Result<Vec<String>, String> {
     Ok(args)
 }
 
+/// yt-dlp is asked to print "ASTRALIS <percent>" for every progress update.
+/// "ASTRALIS  45.3%" -> Some(45.3). Any other line -> None.
+fn parse_progress(line: &str) -> Option<f32> {
+    let rest = line.trim().strip_prefix("ASTRALIS")?;
+    let value: f32 = rest.trim().trim_end_matches('%').trim().parse().ok()?;
+    if value.is_finite() {
+        Some(value.clamp(0.0, 100.0))
+    } else {
+        None
+    }
+}
+
+/// `yt-dlp -g` prints the direct media URL(s). Takes the first https one.
+fn first_https_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("https://"))
+        .map(|line| line.to_string())
+}
+
+/// yt-dlp is checked for updates at most once a day.
+const UPDATE_EVERY_SECS: u64 = 24 * 60 * 60;
+
+/// True when the "last successful update" stamp is missing or older than a day.
+fn update_due(stamp: &Path) -> bool {
+    fs::metadata(stamp)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+        .map(|age| age.as_secs() >= UPDATE_EVERY_SECS)
+        .unwrap_or(true)
+}
+
+/// Songs that are being downloaded right now ("cache:ID" / "library:ID").
+/// The stream's background cache, the prefetch and the Download button can all
+/// ask for the same song; only one yt-dlp may write a given file at a time.
+fn active_downloads() -> &'static Mutex<HashSet<String>> {
+    static ACTIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Releases the claim on a song when dropped (also on errors and early returns).
+struct DownloadGuard(String);
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        let mut set = active_downloads().lock().unwrap_or_else(|e| e.into_inner());
+        set.remove(&self.0);
+    }
+}
+
+/// Some(guard) = you are the one who should download. None = someone else already is.
+fn claim_download(key: &str) -> Option<DownloadGuard> {
+    let mut set = active_downloads().lock().unwrap_or_else(|e| e.into_inner());
+    if set.insert(key.to_string()) {
+        Some(DownloadGuard(key.to_string()))
+    } else {
+        None
+    }
+}
+
 // <<PURE-END>>
 
-use std::process::Command;
-use std::time::UNIX_EPOCH;
+use std::io::{BufRead, BufReader, Read};
+use std::process::{Command, Stdio};
+use std::time::{Instant, UNIX_EPOCH};
 
 // Windows-only: lets us hide the black console window when running yt-dlp
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DEFAULT_DB: &str =
@@ -264,25 +327,60 @@ fn data_dir(app: &AppHandle, sub: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// The yt-dlp to run: the self-updating copy in the app data folder when it
+/// exists, otherwise the one bundled with the app.
+fn yt_exe(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Ok(base) = app_base(app) {
+        let local = base.join("bin").join("yt-dlp.exe");
+        if is_usable(&local) {
+            return Ok(local);
+        }
+    }
+    bin_path(app, "yt-dlp.exe")
+}
+
 /// A yt-dlp command with the console window hidden on Windows.
 fn yt_command(app: &AppHandle) -> Result<Command, String> {
-    let mut cmd = Command::new(bin_path(app, "yt-dlp.exe")?);
+    let mut cmd = Command::new(yt_exe(app)?);
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
     Ok(cmd)
 }
 
 /// Downloads a song with yt-dlp into "cache" or "library".
-fn fetch_audio(app: &AppHandle, video_id: &str, folder: &str) -> Result<String, String> {
+/// `report` = send "download-progress" events to the UI while it downloads.
+fn fetch_audio(
+    app: &AppHandle,
+    video_id: &str,
+    folder: &str,
+    report: bool,
+) -> Result<String, String> {
     if !valid_video_id(video_id) {
         return Err("Invalid video id".to_string());
     }
 
     let dir = data_dir(app, folder)?;
     let file_path = audio_file(&dir, video_id);
+    let done = |path: &Path| -> Result<String, String> { Ok(path.to_string_lossy().to_string()) };
 
+    // One download per song at a time: if another one is already running for this
+    // song, wait for it and use its result instead of starting a second yt-dlp.
+    let key = format!("{}:{}", folder, video_id);
+    let started = Instant::now();
+    let _guard = loop {
+        if is_usable(&file_path) {
+            return done(&file_path);
+        }
+        if let Some(guard) = claim_download(&key) {
+            break guard;
+        }
+        if started.elapsed() > Duration::from_secs(300) {
+            return Err("Timed out waiting for another download of this song".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    };
     if is_usable(&file_path) {
-        return Ok(file_path.to_string_lossy().to_string());
+        return done(&file_path);
     }
     // leftover from a failed / interrupted download
     let _ = fs::remove_file(&file_path);
@@ -302,22 +400,109 @@ fn fetch_audio(app: &AppHandle, video_id: &str, folder: &str) -> Result<String, 
             "m4a",
             "--extractor-args",
             "youtube:player_client=android,web",
+            // one "ASTRALIS 45.3%" line per progress update, read below
+            "--newline",
+            "--progress",
+            "--progress-template",
+            "download:ASTRALIS %(progress._percent_str)s",
         ])
-        .arg(&url);
+        .arg(&url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
 
-    if output.status.success() && is_usable(&file_path) {
-        Ok(file_path.to_string_lossy().to_string())
-    } else {
-        let err = String::from_utf8_lossy(&output.stderr).to_string();
-        if err.trim().is_empty() {
-            Err("yt-dlp finished but no audio file was created".to_string())
-        } else {
-            Err(err)
+    // stderr is drained on its own thread so yt-dlp can never block on a full pipe
+    let stderr = child.stderr.take();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = stderr {
+            let _ = pipe.read_to_end(&mut bytes);
         }
+        String::from_utf8_lossy(&bytes).to_string()
+    });
+
+    let id = video_id.to_string();
+    let emit = |percent: f32| {
+        if report {
+            let _ = app.emit(
+                "download-progress",
+                serde_json::json!({ "id": id, "percent": percent }),
+            );
+        }
+    };
+    emit(0.0);
+
+    if let Some(out) = child.stdout.take() {
+        let mut reader = BufReader::new(out);
+        let mut buf = Vec::new();
+        let mut last = -1.0_f32;
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    let line = String::from_utf8_lossy(&buf);
+                    if let Some(percent) = parse_progress(&line) {
+                        // at most ~100 events per download
+                        if percent >= last + 1.0 || (percent >= 100.0 && last < 100.0) {
+                            last = percent;
+                            emit(percent);
+                        }
+                    }
+                }
+            }
+        }
+        // keep reading to the end so yt-dlp is never stuck writing
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("yt-dlp did not finish: {}", e))?;
+    let err = stderr_thread.join().unwrap_or_default();
+
+    if status.success() && is_usable(&file_path) {
+        emit(100.0);
+        done(&file_path)
+    } else if err.trim().is_empty() {
+        Err("yt-dlp finished but no audio file was created".to_string())
+    } else {
+        Err(err)
+    }
+}
+
+/// Keeps yt-dlp current: YouTube changes often and an old yt-dlp stops working.
+/// The bundled copy may sit in a read-only folder (Program Files), so a writable
+/// copy is made in the app data folder and updated there.
+fn update_ytdlp(app: &AppHandle) -> Result<String, String> {
+    let stamp = data_dir(app, "runtime")?.join("ytdlp-update.stamp");
+    if !update_due(&stamp) {
+        return Ok("checked recently".to_string());
+    }
+
+    let local = data_dir(app, "bin")?.join("yt-dlp.exe");
+    if !is_usable(&local) {
+        fs::copy(bin_path(app, "yt-dlp.exe")?, &local)
+            .map_err(|e| format!("Cannot copy yt-dlp: {}", e))?;
+    }
+
+    let mut cmd = Command::new(&local);
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
+        .arg("-U")
+        .output()
+        .map_err(|e| format!("Failed to run yt-dlp -U: {}", e))?;
+
+    if output.status.success() {
+        let _ = fs::write(&stamp, b"ok");
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        // no internet / blocked: the stamp is not written, so it is retried next launch
+        Err(String::from_utf8_lossy(&output.stderr).to_string())
     }
 }
 
@@ -360,6 +545,50 @@ async fn search_song(
     .map_err(|e| e.to_string())?
 }
 
+/// Direct audio URL of a song, so playback can start right away while the file
+/// is still being cached. The link expires after a few hours.
+#[tauri::command]
+async fn get_stream_url(app: AppHandle, video_id: String) -> Result<String, String> {
+    if !valid_video_id(&video_id) {
+        return Err("Invalid video id".to_string());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let mut cmd = yt_command(&app)?;
+        cmd.args([
+            "-g",
+            "-f",
+            "ba[ext=m4a]/ba/b",
+            "--no-playlist",
+            "--no-warnings",
+            "--socket-timeout",
+            "10",
+            "--extractor-args",
+            "youtube:player_client=android,web",
+        ])
+        .arg(format!("https://www.youtube.com/watch?v={}", video_id));
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        match first_https_line(&stdout) {
+            Some(url) if output.status.success() => Ok(url),
+            _ => {
+                let err = String::from_utf8_lossy(&output.stderr).to_string();
+                Err(if err.trim().is_empty() {
+                    "yt-dlp returned no stream URL".to_string()
+                } else {
+                    err
+                })
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// =========================================================
 /// 2. LOCAL-FIRST LOOKUP
 /// =========================================================
@@ -391,14 +620,19 @@ async fn list_library_ids(app: AppHandle) -> Result<Vec<String>, String> {
 /// =========================================================
 
 /// Temporary download: reuses a local copy if there is one, otherwise downloads into cache.
+/// `silent: true` = no progress events (used when preloading the next song).
 #[tauri::command]
-async fn download_audio(app: AppHandle, video_id: String) -> Result<String, String> {
+async fn download_audio(
+    app: AppHandle,
+    video_id: String,
+    silent: Option<bool>,
+) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let base = app_base(&app)?;
         if let Some(path) = find_local_in(&base, &video_id)? {
             return Ok(path_string(path));
         }
-        fetch_audio(&app, &video_id, "cache")
+        fetch_audio(&app, &video_id, "cache", !silent.unwrap_or(false))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -412,7 +646,7 @@ async fn save_to_library(app: AppHandle, video_id: String) -> Result<String, Str
         if let Some(path) = promote_to_library_in(&base, &video_id)? {
             return Ok(path_string(path));
         }
-        fetch_audio(&app, &video_id, "library")
+        fetch_audio(&app, &video_id, "library", true)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -510,10 +744,21 @@ pub fn run() {
                 }
             });
 
+            // A few seconds after launch: update yt-dlp if the last check was over a day ago
+            let updater = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(8));
+                match update_ytdlp(&updater) {
+                    Ok(message) => println!("yt-dlp update: {}", message.trim()),
+                    Err(err) => eprintln!("yt-dlp update skipped: {}", err.trim()),
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             search_song,
+            get_stream_url,
             get_local_path,
             list_library_ids,
             download_audio,

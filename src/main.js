@@ -47,6 +47,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     playToken: 0, // Incremented on every play request; stale requests are discarded
     currentSongId: null, // id of the song currently loaded in the player
     localIds: new Set(), // ids of permanently downloaded songs (for badges)
+    currentSong: null, // the song object currently loaded (used by lyrics)
+    streamFallback: null, // set while streaming: called if the stream fails, to download instead
+    waitingDownloadId: null, // song we are waiting on (full download) before it can play
   };
 
   /** * Local Session Database
@@ -67,6 +70,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     history: U.loadHistory(),
     cache: U.createCache(10 * 60 * 1000, 30), // same query within 10 min = instant
     musicFails: 0, // after 2 failures in a row YouTube Music search is skipped for this session
+  };
+
+  /** * Lyrics panel state
+   */
+  const LYRICS = {
+    open: false,
+    token: 0, // increases on every load; results of older loads are ignored
+    songId: null,
+    data: null, // {synced, lines:[{t,text}], instrumental?}
+    active: -1, // index of the highlighted line
+    // saved in localStorage: found lyrics are kept 30 days, "not found" only 1 day (the library may get it later)
+    cache: U.createStoredCache("astralis_lyrics_v1", 60, (v) => (v.none ? 24 : 24 * 30) * 60 * 60 * 1000),
   };
 
   /** * DOM Element Caching
@@ -191,17 +206,107 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 4. AUDIO PROCESSING ENGINE
   // ==========================================================================
 
+  // ---- Download progress: a ring on the song card while it downloads ----------
+  const DL = { pct: new Map(), refs: new Map() }; // song id -> percent / number of running downloads
+
+  /** Shows or hides the progress ring on the card of this song. */
+  function paintDl(id) {
+    const card = document.getElementById(`card-${id}`);
+    if (!card) return;
+    const active = DL.refs.has(id);
+    card.classList.toggle("is-downloading", active);
+    if (!active) return;
+    const pct = DL.pct.get(id) || 0;
+    card.classList.toggle("dl-indeterminate", pct <= 0);
+    card.style.setProperty("--pct", pct > 0 ? pct : 30);
+  }
+
+  /** Wraps a backend download promise so the card shows the ring while it runs. */
+  function trackDownload(id, promise) {
+    DL.refs.set(id, (DL.refs.get(id) || 0) + 1);
+    paintDl(id);
+    return promise.finally(() => {
+      const left = (DL.refs.get(id) || 1) - 1;
+      if (left > 0) {
+        DL.refs.set(id, left);
+      } else {
+        DL.refs.delete(id);
+        DL.pct.delete(id);
+      }
+      paintDl(id);
+    });
+  }
+
+  // The backend sends {id, percent} while yt-dlp downloads
+  window.__TAURI__?.event?.listen?.("download-progress", (event) => {
+    const { id, percent } = event.payload || {};
+    if (!id || !DL.refs.has(id)) return;
+    DL.pct.set(id, percent);
+    paintDl(id);
+    if (STATE.waitingDownloadId === id && STATE.currentSongId === id) {
+      document.getElementById("np-artist").textContent = `Downloading... ${Math.round(percent)}%`;
+    }
+  });
+
+  // ---- Helpers for playback ----------------------------------------------------
+
+  /** Adds the song to the "recent" list (compact copy: id, title, artist, thumbnail, duration). */
+  function commitRecent(song) {
+    DATABASE.recentSongs = DATABASE.recentSongs.filter((s) => s.id !== song.id);
+    DATABASE.recentSongs.unshift(U.compactSong(song));
+    if (DATABASE.recentSongs.length > 10) DATABASE.recentSongs.pop();
+    persistRecent();
+  }
+
+  let prefetchingId = null;
+  /** Quietly downloads the NEXT song of the queue so it starts instantly. */
+  function prefetchNext() {
+    if (STATE.playContext === "search" || STATE.repeatMode === "one") return;
+    const queue = STATE.currentQueue;
+    if (!queue.length) return;
+    let index = STATE.currentSongIndex + 1;
+    if (index >= queue.length) {
+      if (STATE.repeatMode === "all") index = 0;
+      else return;
+    }
+    const next = queue[index];
+    if (!next || next.id === STATE.currentSongId || STATE.localIds.has(next.id) || prefetchingId === next.id) return;
+
+    prefetchingId = next.id;
+    invoke("download_audio", { videoId: next.id, silent: true })
+      .catch((err) => console.warn("Prefetch failed:", err))
+      .finally(() => {
+        if (prefetchingId === next.id) prefetchingId = null;
+      });
+  }
+
+  /** While a song streams, also save it to the cache so the next play is instant and works offline. */
+  function cacheInBackground(song, token) {
+    setTimeout(() => {
+      if (token !== STATE.playToken) return; // skipped to another song meanwhile: do not waste bandwidth
+      trackDownload(song.id, invoke("download_audio", { videoId: song.id }))
+        .then(() => {
+          if (token === STATE.playToken) prefetchNext();
+        })
+        .catch((err) => console.warn("Background cache failed:", err));
+    }, 1500);
+  }
+
   /**
    * Main execution bridge for loading and playing audio tracks.
-   * Handles UI crossfading, metadata extraction, and backend stream calls.
+   *  1. Song already on the device (library / non-expired cache)  -> play the file
+   *  2. Otherwise                                                  -> STREAM it right away and
+   *     cache it in the background. If the stream fails, download the file and play that.
    * @param {Object} song - The song metadata payload.
-   * @param {boolean} isFromLibrary - Unused now: the backend always checks the library,
-   *   then the (non-expired) cache, and only downloads when the song is not on the device.
+   * @param {boolean} isFromLibrary - Unused: the backend decides where the audio comes from.
    */
   async function executePlay(song, isFromLibrary) {
     // Every request gets a token; if a newer request starts, older ones stop silently.
     const token = ++STATE.playToken;
     STATE.currentSongId = song.id;
+    STATE.currentSong = song;
+    STATE.streamFallback = null;
+    STATE.waitingDownloadId = null;
 
     // 1. Crossfade Out UI
     DOM.npContainer.style.opacity = 0;
@@ -210,6 +315,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     document.querySelectorAll(".song-card").forEach((c) => c.classList.remove("now-playing-active"));
     const activeCard = document.getElementById(`card-${song.id}`);
     if (activeCard) activeCard.classList.add("now-playing-active");
+
+    if (LYRICS.open) loadLyrics(song);
 
     // 2. Wait for CSS transition sync (400ms)
     setTimeout(async () => {
@@ -239,33 +346,112 @@ document.addEventListener("DOMContentLoaded", async () => {
       DOM.npContainer.style.opacity = 1;
 
       // 4. Backend Call & Execution
-      try {
-        // Local first: library, then non-expired cache. Download only if it is not on the device.
-        let absolutePath = await invoke("get_local_path", { videoId: song.id });
-        if (!absolutePath) {
-          if (token !== STATE.playToken) return;
-          document.getElementById("np-artist").textContent = "Downloading... ⏳";
-          absolutePath = await invoke("download_audio", { videoId: song.id });
+      const setStatus = (text) => {
+        if (token === STATE.playToken) document.getElementById("np-artist").textContent = text;
+      };
+      const fail = (err) => {
+        if (token !== STATE.playToken) return; // errors of superseded requests are ignored
+        console.error(err);
+        STATE.streamFallback = null;
+        setStatus("❌ Failed to play");
+      };
+      const started = () => {
+        // isPlaying / vinyl / play icon are updated by the audio "play" event listener
+        setStatus(artist);
+        commitRecent(song);
+      };
+      const playFile = async (path, resumeAt = 0) => {
+        DOM.audio.src = convertFileSrc(path);
+        if (resumeAt > 1) {
+          DOM.audio.addEventListener(
+            "loadedmetadata",
+            () => {
+              DOM.audio.currentTime = resumeAt;
+            },
+            { once: true }
+          );
         }
-
-        if (token !== STATE.playToken) return; // user picked another song while this one loaded
-
-        DOM.audio.src = convertFileSrc(absolutePath);
         await DOM.audio.play();
+      };
+
+      // Download the whole file (the card shows progress), then play it
+      const playFromDownload = async (resumeAt = 0) => {
+        STATE.waitingDownloadId = song.id;
+        setStatus("Downloading... ⏳");
+        try {
+          const path = await trackDownload(song.id, invoke("download_audio", { videoId: song.id }));
+          if (token !== STATE.playToken) return false;
+          await playFile(path, resumeAt);
+        } finally {
+          if (STATE.waitingDownloadId === song.id) STATE.waitingDownloadId = null;
+        }
+        return token === STATE.playToken;
+      };
+
+      // Runs at most once per request: the stream failed, so use the downloaded file instead
+      let fellBack = false;
+      const fallback = async (resumeAt) => {
+        if (fellBack || token !== STATE.playToken) return;
+        fellBack = true;
+        STATE.streamFallback = null;
+        try {
+          if (await playFromDownload(resumeAt)) {
+            started();
+            prefetchNext();
+          }
+        } catch (err) {
+          fail(err);
+        }
+      };
+
+      try {
+        // Local first: library, then non-expired cache.
+        const local = await invoke("get_local_path", { videoId: song.id });
         if (token !== STATE.playToken) return;
 
-        // isPlaying / vinyl / play icon are updated by the audio "play" event listener
-        document.getElementById("np-artist").textContent = artist;
+        if (local) {
+          await playFile(local);
+          if (token !== STATE.playToken) return;
+          started();
+          prefetchNext();
+          return;
+        }
 
-        // Push to Recent History (compact copy: id, title, artist, thumbnail, duration)
-        DATABASE.recentSongs = DATABASE.recentSongs.filter((s) => s.id !== song.id);
-        DATABASE.recentSongs.unshift(U.compactSong(song));
-        if (DATABASE.recentSongs.length > 10) DATABASE.recentSongs.pop();
-        persistRecent();
+        // Not on this device: ask for a direct stream link
+        let streamUrl = null;
+        try {
+          streamUrl = await invoke("get_stream_url", { videoId: song.id });
+        } catch (err) {
+          console.warn("No stream link, downloading instead:", err);
+        }
+        if (token !== STATE.playToken) return;
+
+        if (!streamUrl) {
+          fellBack = true;
+          if (await playFromDownload()) {
+            started();
+            prefetchNext();
+          }
+          return;
+        }
+
+        // Stream it now; if the stream breaks (blocked, expired, connection lost) the audio
+        // "error" listener calls STATE.streamFallback, which downloads and resumes.
+        STATE.streamFallback = () => fallback(DOM.audio.currentTime || 0);
+        DOM.audio.src = streamUrl;
+        try {
+          await DOM.audio.play();
+        } catch (err) {
+          console.warn("Stream could not start, downloading instead:", err);
+          await fallback(0);
+          return;
+        }
+        if (token !== STATE.playToken) return;
+
+        started();
+        cacheInBackground(song, token);
       } catch (error) {
-        if (token !== STATE.playToken) return; // ignore errors from superseded requests
-        document.getElementById("np-artist").textContent = "❌ Failed to play";
-        console.error(error);
+        fail(error);
       }
     }, 400);
   }
@@ -457,10 +643,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       card.innerHTML = `
         <img src="${esc(cover)}" class="song-cover">
         <div class="song-info">
-          <span class="song-title">${esc(title)}</span>
+          <span class="song-title" title="${esc(title)}"><span class="marq">${esc(title)}</span></span>
           <span class="song-artist">${esc(artist)}${durationText ? `<span class="song-dur"> · ${durationText}</span>` : ""}</span>
           ${showBadge ? DL_BADGE_HTML : ""}
         </div>
+        <span class="card-spin"></span>
         <div class="song-actions">${actionButtonsHTML}</div>
       `;
 
@@ -477,7 +664,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           dlBtn.dataset.busy = "1";
           dlBtn.innerHTML = "⏳";
           try {
-            await invoke("save_to_library", { videoId: song.id });
+            await trackDownload(song.id, invoke("save_to_library", { videoId: song.id }));
             let dlPlaylist = DATABASE.userPlaylists.find((p) => p.id === "downloaded");
             if (!dlPlaylist) {
               // Self-heal: recreate the system playlist if it is missing from the DB
@@ -608,6 +795,27 @@ document.addEventListener("DOMContentLoaded", async () => {
       });
 
       container.appendChild(card);
+      paintDl(song.id); // a download may already be running for this song
+    });
+
+    // One-line titles: measure after layout and slide the long ones
+    requestAnimationFrame(() => fitMarquees(container));
+  }
+
+  /**
+   * Song titles stay on ONE line. A title that does not fit gets the class "is-long" and
+   * the distance it must slide (--shift); CSS slides it while the card is hovered / playing.
+   */
+  function fitMarquees(root = document) {
+    root.querySelectorAll(".song-title").forEach((box) => {
+      const inner = box.firstElementChild;
+      if (!inner) return;
+      const overflow = inner.offsetWidth - box.clientWidth;
+      box.classList.toggle("is-long", overflow > 2);
+      if (overflow > 2) {
+        box.style.setProperty("--shift", `-${overflow + 12}px`);
+        box.style.setProperty("--marq-dur", `${Math.min(18, 3 + overflow / 35).toFixed(1)}s`);
+      }
     });
   }
 
@@ -626,33 +834,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       ? "The search engine (yt-dlp) could not start."
       : "Search failed. Check your internet connection and try again.";
 
-  /**
-   * Gets songs for a query. YouTube Music ("Songs" only) is tried first so you do not
-   * get random videos; normal YouTube search (filtered) is the fallback.
-   */
-  async function fetchSongs(query) {
-    const key = query.toLowerCase();
-    const cached = SEARCH.cache.get(key);
-    if (cached) return cached;
+async function fetchSongs(query) {
+  const key = query.toLowerCase();
+  const cached = SEARCH.cache.get(key);
+  if (cached) return cached;
 
-    let results = [];
-    if (SEARCH.musicFails < 2) {
-      try {
-        const raw = await invoke("search_song", { query, source: "music" });
-        results = U.processSearch(raw, "music", query);
-        SEARCH.musicFails = 0;
-      } catch (err) {
-        SEARCH.musicFails++;
-        console.warn("YouTube Music search failed, falling back to YouTube:", err);
-      }
-    }
-    if (results.length === 0) {
-      const raw = await invoke("search_song", { query, source: "youtube" });
-      results = U.processSearch(raw, "youtube", query);
-    }
-    if (results.length > 0) SEARCH.cache.set(key, results);
-    return results;
-  }
+  // YouTube Music flat results have no artist field, so use normal YouTube search.
+  const raw = await invoke("search_song", { query, source: "youtube" });
+  const results = U.processSearch(raw, "youtube", query);
+
+  if (results.length > 0) SEARCH.cache.set(key, results);
+  return results;
+}
 
   /** Draws the search results area from SEARCH.status. Safe to call when the tab is not open. */
   function paintSearch() {
@@ -839,6 +1032,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   DOM.audio.addEventListener("pause", () => syncPlayingUI(false));
   DOM.audio.addEventListener("error", () => {
     if (!DOM.audio.getAttribute("src")) return; // we cleared it ourselves
+    // A stream that fails (blocked, expired, connection lost) is replaced by the downloaded file
+    if (STATE.streamFallback) {
+      const retry = STATE.streamFallback;
+      STATE.streamFallback = null;
+      retry();
+      return;
+    }
     syncPlayingUI(false);
     document.getElementById("np-artist").textContent = "❌ Failed to play";
   });
@@ -893,9 +1093,12 @@ document.addEventListener("DOMContentLoaded", async () => {
       DOM.progressRing.style.strokeDashoffset = MAX_OFFSET - percent * (MAX_OFFSET / 4);
       DOM.timeDisplay.textContent = `${formatTime(DOM.audio.currentTime)} / ${formatTime(DOM.audio.duration)}`;
     }
+    syncLyrics();
   });
+  DOM.audio.addEventListener("seeked", () => syncLyrics());
 
   DOM.audio.addEventListener("ended", () => {
+    STATE.streamFallback = null;
     if (STATE.repeatMode === "one") {
       DOM.audio.currentTime = 0;
       DOM.audio.play().catch(console.error);
@@ -1042,25 +1245,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     setTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
   });
 
-  /** Keeps the maximize / fullscreen icons in sync with the real window state. */
+  /** Keeps the maximize / restore icon in sync with the real window state. */
   const syncWindowState = async () => {
     if (!appWindow) return;
     try {
       document.body.classList.toggle("is-maximized", await appWindow.isMaximized());
-      document.body.classList.toggle("is-fullscreen", await appWindow.isFullscreen());
     } catch (err) {
       console.error(err);
     }
-  };
-
-  const toggleFullscreen = async () => {
-    if (!appWindow) return;
-    try {
-      await appWindow.setFullscreen(!(await appWindow.isFullscreen()));
-    } catch (err) {
-      console.error(err);
-    }
-    syncWindowState();
   };
 
   const onClick = (id, fn) =>
@@ -1071,18 +1263,461 @@ document.addEventListener("DOMContentLoaded", async () => {
     syncWindowState();
   });
   onClick("win-close", () => appWindow?.close());
-  onClick("fullscreen-btn", toggleFullscreen);
 
   appWindow?.onResized?.(syncWindowState);
   syncWindowState();
 
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "F11") {
-      e.preventDefault();
-      toggleFullscreen();
-    } else if (e.key === "Escape" && document.body.classList.contains("is-fullscreen")) {
-      toggleFullscreen();
+  // ==========================================================================
+  // 7c. LYRICS  (LRCLIB: free, no account, time-synced when available)
+  // ==========================================================================
+  const lyricsBody = document.getElementById("lyrics-body");
+  const lyricsBtn = document.getElementById("lyrics-btn");
+  const contentSection = document.querySelector(".content-section");
+
+  function setLyricsMessage(text, hint = "") {
+    lyricsBody.className = "ly-body";
+    lyricsBody.innerHTML = `<div class="ly-msg"><p>${esc(text)}</p>${hint ? `<p class="hint">${esc(hint)}</p>` : ""}</div>`;
+    document.getElementById("lyrics-tag").textContent = "";
+  }
+
+  /** One single message for: not in the lyrics library, instrumental, or the lookup failed. */
+  function showNotFound() {
+    setLyricsMessage("No lyrics found for this song.", "It may not be in the lyrics library, or it is instrumental.");
+  }
+
+  function renderLyrics(data) {
+    LYRICS.data = data;
+    LYRICS.active = -1;
+    if (!data || !data.lines || !data.lines.length) {
+      showNotFound();
+      return;
     }
+    lyricsBody.className = `ly-body ${data.synced ? "synced" : "plain"}`;
+    lyricsBody.innerHTML = data.lines
+      .map((line, i) => `<p class="ly-line${line.text ? "" : " ly-gap"}" data-i="${i}">${esc(line.text || "♪")}</p>`)
+      .join("");
+    document.getElementById("lyrics-tag").textContent = data.synced ? "SYNCED" : "TEXT ONLY";
+    lyricsBody.scrollTop = 0;
+    syncLyrics(true);
+  }
+
+  /** Highlights the line being sung and scrolls it to the middle. */
+  function syncLyrics(jump = false) {
+    if (!LYRICS.open || !LYRICS.data || !LYRICS.data.synced) return;
+    const index = U.activeLine(LYRICS.data.lines, DOM.audio.currentTime + 0.2);
+    if (index === LYRICS.active && !jump) return;
+    LYRICS.active = index;
+
+    const previous = lyricsBody.querySelector(".ly-line.active");
+    if (previous) previous.classList.remove("active");
+    if (index < 0) return;
+    const line = lyricsBody.querySelector(`.ly-line[data-i="${index}"]`);
+    if (!line) return;
+    line.classList.add("active");
+    lyricsBody.scrollTo({ top: line.offsetTop - lyricsBody.clientHeight / 2 + line.offsetHeight / 2, behavior: jump ? "auto" : "smooth" });
+  }
+
+  /** One request to LRCLIB. Returns the parsed JSON, or null when nothing was found. */
+async function lrclib(path, params, retries = 1) {
+  const url = new URL(`https://lrclib.net/api/${path}`);
+  Object.entries(params).forEach(([k, v]) => v && url.searchParams.set(k, v));
+
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (res.status === 404) return null;
+      if (res.status >= 400 && res.status < 500 && res.status !== 429) return null; // bad query = "nothing found"
+      if (!res.ok) { const e = new Error(`LRCLIB HTTP ${res.status}`); e.kind = "server"; throw e; }
+      return await res.json();
+    } catch (err) {
+      if (!err.kind) err.kind = err.name === "AbortError" ? "timeout" : "network";
+      console.warn("LRCLIB", path, err.kind, err.message);   // helps you see what's failing
+      if (err.kind === "server" || attempt >= retries) throw err;   // don't retry server errors / 429
+      await new Promise((r) => setTimeout(r, 800));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
+  async function fetchLyrics(song) {
+    const { tracks, artists, full } = U.lyricsCandidates(song);
+    if (!tracks.length) return null;
+    if (/\b(instrumental|karaoke)\b/i.test(full)) return null; // title says so: no need to ask the server
+    const duration = Number(song.duration) || 0;
+
+    let lastError = null;
+    let answered = false;
+
+    // 1. exact lookups: best 2 track names x best 3 artist names, max 5 requests
+    const exact = [];
+    for (const t of tracks.slice(0, 2)) {
+      for (const a of artists.slice(0, 3)) exact.push({ track_name: t, artist_name: a, duration });
+    }
+    for (const params of exact.slice(0, 5)) {
+      try {
+        const rec = await lrclib("get", params, 0);
+        answered = true;
+        const found = U.lyricsFromRecord(rec); // null when empty/instrumental -> keep trying
+        if (found) return found;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    // 2. search fallback (song length must match, so wrong songs are filtered out)
+    const searches = [
+      artists[0] ? { q: `${artists[0]} ${tracks[0]}` } : null,
+      { q: tracks[0] },
+      tracks[1] ? { q: tracks[1] } : null,
+      full !== tracks[0] ? { q: full } : null,
+    ].filter(Boolean);
+    for (const params of searches) {
+      try {
+        const record = U.pickLyrics(await lrclib("search", params, 0), duration);
+        answered = true;
+        const found = U.lyricsFromRecord(record);
+        if (found) return found;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    if (!answered && lastError) throw lastError;
+    return null;
+  }
+
+  async function loadLyrics(song) {
+    if (!song) {
+      document.getElementById("lyrics-title").textContent = "No song playing";
+      document.getElementById("lyrics-artist").textContent = "";
+      setLyricsMessage("Play a song to see its lyrics.");
+      return;
+    }
+    document.getElementById("lyrics-title").textContent = song.track || song.title || "";
+    document.getElementById("lyrics-artist").textContent = song.artist || song.uploader || "";
+
+    if (LYRICS.songId === song.id && LYRICS.data) {
+      syncLyrics(true); // same song, already loaded
+      return;
+    }
+    LYRICS.songId = song.id;
+    LYRICS.data = null;
+    const token = ++LYRICS.token;
+
+    const cached = LYRICS.cache.get(song.id);
+    if (cached) {
+      if (cached.none) showNotFound();
+      else renderLyrics(cached);
+      return;
+    }
+
+    setLyricsMessage("Searching lyrics... ⏳");
+    try {
+      const data = await fetchLyrics(song);
+      if (token !== LYRICS.token) return; // another song started meanwhile
+      LYRICS.cache.set(song.id, data || { none: true });
+      if (data) renderLyrics(data);
+      else showNotFound();
+    } catch (err) {
+      if (token !== LYRICS.token) return;
+      console.error("Lyrics error:", err);
+      LYRICS.songId = null; // not cached, so reopening the panel tries again
+      showNotFound();
+    }
+  }
+
+  function toggleLyrics(force) {
+    LYRICS.open = typeof force === "boolean" ? force : !LYRICS.open;
+    contentSection.classList.toggle("lyrics-on", LYRICS.open);
+    lyricsBtn.classList.toggle("on", LYRICS.open);
+    if (LYRICS.open) loadLyrics(STATE.currentSong);
+  }
+
+  lyricsBtn.addEventListener("click", () => toggleLyrics());
+  document.getElementById("lyrics-close").addEventListener("click", () => toggleLyrics(false));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && LYRICS.open) toggleLyrics(false);
+  });
+  // Click a synced line to jump to it
+  lyricsBody.addEventListener("click", (e) => {
+    const line = e.target.closest(".ly-line");
+    if (!line || !LYRICS.data || !LYRICS.data.synced || !DOM.audio.getAttribute("src")) return;
+    const target = LYRICS.data.lines[Number(line.dataset.i)];
+    if (target) DOM.audio.currentTime = target.t;
+  });
+
+  // ==========================================================================
+  // SHORTCUTS, MEDIA KEYS, SAVED VOLUME, RESUME
+  // ==========================================================================
+
+  // ---------- Volume (saved) ----------
+  const VOLUME_KEY = "astralis_volume";
+
+  function applyVolume(value, save = true) {
+    const v = Math.min(1, Math.max(0, Number(value) || 0));
+    DOM.audio.volume = v;
+    DOM.volumeSlider.value = v;
+    DOM.volumeIcon.src = v === 0 ? "assets/no-volume.png" : "assets/max-volume.png";
+    if (v > 0) STATE.previousVolume = v;
+    if (save) {
+      try {
+        localStorage.setItem(VOLUME_KEY, JSON.stringify({ volume: v, previous: STATE.previousVolume }));
+      } catch {}
+    }
+  }
+
+  function toggleMute() {
+    if (DOM.audio.volume > 0) {
+      STATE.previousVolume = DOM.audio.volume;
+      applyVolume(0);
+    } else {
+      applyVolume(STATE.previousVolume || 1);
+    }
+  }
+
+  function restoreVolume() {
+    try {
+      const s = JSON.parse(localStorage.getItem(VOLUME_KEY) || "null");
+      if (!s) return;
+      STATE.previousVolume = s.previous > 0 ? s.previous : 1;
+      applyVolume(s.volume, false);
+    } catch {}
+  }
+
+  // ---------- Play / pause (button, Space and media keys all use this) ----------
+  const RESUME = { song: null, position: 0, seekId: null, seekTo: 0 };
+
+  function togglePlayback() {
+    if (!DOM.audio.getAttribute("src")) {
+      if (RESUME.song) startResume(); // nothing loaded yet, but we have a saved song
+      return;
+    }
+    if (DOM.audio.paused) DOM.audio.play().catch(console.error);
+    else DOM.audio.pause();
+  }
+
+  function seekBy(seconds) {
+    const d = DOM.audio.duration;
+    if (!DOM.audio.getAttribute("src") || !isFinite(d)) return;
+    DOM.audio.currentTime = Math.min(Math.max(DOM.audio.currentTime + seconds, 0), d);
+  }
+
+  // ---------- Media Session (keyboard media keys + Windows overlay) ----------
+  const MS = "mediaSession" in navigator ? navigator.mediaSession : null;
+
+  function updateMediaSession(title, artist, cover) {
+    if (!MS) return;
+    try {
+      MS.metadata = new MediaMetadata({
+        title,
+        artist,
+        album: "Astralis Vinyl",
+        artwork: cover ? [{ src: cover, sizes: "512x512" }] : [],
+      });
+    } catch {}
+    // Search results have no queue, so hide prev/next there
+    const canSkip = STATE.playContext !== "search" && STATE.currentQueue.length > 1;
+    try {
+      MS.setActionHandler("previoustrack", canSkip ? () => DOM.btnPrev.click() : null);
+      MS.setActionHandler("nexttrack", canSkip ? () => DOM.btnNext.click() : null);
+    } catch {}
+  }
+
+  function updatePosition() {
+    if (!MS || !MS.setPositionState) return;
+    const d = DOM.audio.duration;
+    if (!isFinite(d) || d <= 0) return;
+    try {
+      MS.setPositionState({ duration: d, playbackRate: DOM.audio.playbackRate || 1, position: Math.min(DOM.audio.currentTime, d) });
+    } catch {}
+  }
+
+  if (MS) {
+    const on = (action, fn) => {
+      try { MS.setActionHandler(action, fn); } catch {}
+    };
+    on("play", () => { if (DOM.audio.paused) togglePlayback(); });
+    on("pause", () => DOM.audio.pause());
+    on("seekbackward", (d) => seekBy(-(d.seekOffset || 10)));
+    on("seekforward", (d) => seekBy(d.seekOffset || 10));
+    on("seekto", (d) => {
+      if (d.seekTime != null && isFinite(DOM.audio.duration)) DOM.audio.currentTime = d.seekTime;
+    });
+
+    DOM.audio.addEventListener("play", () => (MS.playbackState = "playing"));
+    DOM.audio.addEventListener("pause", () => (MS.playbackState = "paused"));
+    ["play", "pause", "seeked", "durationchange", "ratechange"].forEach((ev) => DOM.audio.addEventListener(ev, updatePosition));
+  }
+
+  // ---------- Resume last song + position ----------
+  const SESSION_KEY = "astralis_session";
+  let loadedSongId = null; // the song whose audio is really loaded (protects the saved position)
+  let lastSave = 0;
+
+  function saveSession(force = false, position = Math.floor(DOM.audio.currentTime)) {
+    const song = STATE.currentSong;
+    if (!song || loadedSongId !== STATE.currentSongId || !DOM.audio.getAttribute("src")) return;
+    const now = Date.now();
+    if (!force && now - lastSave < 5000) return;
+    lastSave = now;
+    try {
+      localStorage.setItem(
+        SESSION_KEY,
+        JSON.stringify({ song: U.compactSong(song), position, ctx: STATE.playContext, playlistId: STATE.currentPlaylistId })
+      );
+    } catch {}
+  }
+
+  DOM.audio.addEventListener("loadedmetadata", () => {
+    loadedSongId = STATE.currentSongId;
+    RESUME.song = null;
+    // Jump to the saved position once, and only for the song we are resuming
+    if (RESUME.seekTo > 0 && RESUME.seekId === STATE.currentSongId) {
+      const d = DOM.audio.duration;
+      if (!isFinite(d) || RESUME.seekTo < d - 2) DOM.audio.currentTime = RESUME.seekTo;
+    }
+    RESUME.seekTo = 0;
+    updatePosition();
+  });
+  DOM.audio.addEventListener("timeupdate", () => saveSession(false));
+  DOM.audio.addEventListener("pause", () => saveSession(true));
+  DOM.audio.addEventListener("seeked", () => saveSession(true));
+  DOM.audio.addEventListener("ended", () => saveSession(true, 0)); // finished: next launch starts it from the top
+  document.addEventListener("visibilitychange", () => { if (document.hidden) saveSession(true); });
+  window.addEventListener("pagehide", () => saveSession(true));
+
+  function startResume() {
+    const { song, position } = RESUME;
+    RESUME.song = null;
+    RESUME.seekId = song.id;
+    RESUME.seekTo = position;
+    executePlay(song, STATE.currentPlaylistId === "downloaded");
+  }
+
+  /** Shows the last song (paused, nothing downloaded yet). The first Play press loads it and jumps to the position. */
+  function restoreSession() {
+    let s = null;
+    try { s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch {}
+    if (!s || !s.song || !s.song.id) return;
+    const song = s.song;
+
+    STATE.currentSong = song;
+    STATE.currentSongId = song.id;
+    STATE.playContext = s.ctx === "search" ? "search" : "playlist";
+
+    let queue = [];
+    if (STATE.playContext === "playlist") {
+      const list = s.playlistId === "recent" ? DATABASE.recentSongs : (DATABASE.userPlaylists.find((p) => p.id === s.playlistId) || {}).songs;
+      queue = Array.isArray(list) ? list : [];
+    }
+    const index = queue.findIndex((x) => x.id === song.id);
+    STATE.currentQueue = index >= 0 ? queue : [];
+    STATE.currentSongIndex = index;
+    STATE.currentPlaylistId = index >= 0 ? s.playlistId : null;
+    DOM.btnPrev.disabled = DOM.btnNext.disabled = STATE.playContext === "search" || index < 0;
+
+    document.getElementById("np-title").textContent = song.title || "Unknown Title";
+    document.getElementById("np-artist").textContent = song.artist || "Unknown Artist";
+    if (song.thumbnail) {
+      document.getElementById("np-cover").src = song.thumbnail;
+      document.getElementById("np-cover").style.display = "block";
+      document.getElementById("cover").src = song.thumbnail;
+      document.getElementById("cover").style.display = "block";
+    }
+    const position = Number(s.position) || 0;
+    const duration = Number(song.duration) || 0;
+    DOM.timeDisplay.textContent = `${formatTime(position)} / ${formatTime(duration)}`;
+    if (duration) DOM.progressRing.style.strokeDashoffset = MAX_OFFSET - Math.min(position / duration, 1) * (MAX_OFFSET / 4);
+
+    RESUME.song = song;
+    RESUME.position = position;
+  }
+
+  // ---------- Keyboard shortcuts ----------
+  const MODALS = [
+    ["confirm-modal", "confirm-cancel"],
+    ["select-playlist-modal", "close-select-modal-btn"],
+    ["playlist-modal", "cancel-playlist-btn"],
+  ];
+  const openModal = () =>
+    MODALS.find(([id]) => {
+      const el = document.getElementById(id);
+      return el && el.style.display !== "none";
+    });
+
+  const isTextField = (el) =>
+    !!el &&
+    (el.isContentEditable ||
+      el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT" ||
+      (el.tagName === "INPUT" && !/^(range|checkbox|radio|button|submit|file|color)$/i.test(el.type)));
+
+  function focusSearch() {
+    const go = () => {
+      const input = document.getElementById("search-input");
+      if (input) { input.focus(); input.select(); }
+      return !!input;
+    };
+    if (go()) return;
+    document.querySelector('.top-nav li[data-target="search"]').click();
+    let tries = 0; // the page appears after a short fade, so wait for the input
+    const timer = setInterval(() => {
+      if (go() || ++tries > 20) clearInterval(timer);
+    }, 50);
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return; // keep Ctrl+R, Alt+Left, etc. for the system
+
+    // Esc closes one layer at a time: modal -> typing -> volume popup -> lyrics
+    if (e.key === "Escape") {
+      const modal = openModal();
+      if (modal) { document.getElementById(modal[1]).click(); return; }
+      if (isTextField(e.target)) { e.target.blur(); return; }
+      if (DOM.volumeContainer.classList.contains("active")) { DOM.volumeContainer.classList.remove("active"); return; }
+      if (LYRICS.open) toggleLyrics(false);
+      return;
+    }
+
+    if (isTextField(e.target) || openModal()) return;
+
+    switch (e.code) {
+      case "Space":
+        e.preventDefault();
+        if (!e.repeat) togglePlayback();
+        break;
+      case "ArrowLeft":
+      case "ArrowRight":
+        if (e.target.type === "range") return; // the volume slider keeps its own arrow keys
+        e.preventDefault();
+        seekBy(e.code === "ArrowLeft" ? -5 : 5);
+        break;
+      case "KeyN":
+        if (!e.repeat) DOM.btnNext.click();
+        break;
+      case "KeyP":
+        if (!e.repeat) DOM.btnPrev.click();
+        break;
+      case "KeyM":
+        if (!e.repeat) toggleMute();
+        break;
+      case "KeyR":
+        if (!e.repeat) DOM.btnRepeat.click();
+        break;
+      default:
+        if (e.key === "/") {
+          e.preventDefault();
+          focusSearch();
+        }
+    }
+  });
+
+  // A focused button would also "click" itself when Space is released: stop that
+  document.addEventListener("keyup", (e) => {
+    if (e.code === "Space" && !isTextField(e.target) && !openModal()) e.preventDefault();
   });
 
   // ==========================================================================
@@ -1097,6 +1732,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     item.addEventListener("click", () => {
       DOM.navItems.forEach((nav) => nav.classList.remove("active"));
       item.classList.add("active");
+      toggleLyrics(false); // leaving the lyrics view when a tab is chosen
       renderPage(item.getAttribute("data-target"));
     });
   });
@@ -1154,6 +1790,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   await refreshLocalIds();
+
+  // Long song titles are measured again when the window is resized or the fonts finish loading
+  let marqueeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(marqueeTimer);
+    marqueeTimer = setTimeout(() => fitMarquees(), 150);
+  });
+  document.fonts?.ready?.then(() => fitMarquees());
 
   DOM.navItems.forEach((nav) => nav.classList.remove("active"));
   document.querySelector('[data-target="home"]').classList.add("active");

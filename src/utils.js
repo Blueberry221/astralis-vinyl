@@ -266,7 +266,239 @@
     };
   }
 
+  /** Like createCache, but survives page reloads (localStorage). ttlFor(value) gives each entry's lifetime. */
+  function createStoredCache(storageKey, maxEntries, ttlFor) {
+    var map = new Map();
+    try {
+      var raw = JSON.parse(root.localStorage.getItem(storageKey) || "[]");
+      if (Array.isArray(raw)) {
+        raw.forEach(function (e) {
+          if (e && e.k != null && e.v) map.set(e.k, { time: Number(e.t) || 0, value: e.v });
+        });
+      }
+    } catch (e) {}
+
+    function save() {
+      var arr = [];
+      map.forEach(function (hit, k) { arr.push({ k: k, t: hit.time, v: hit.value }); });
+      while (arr.length) {
+        try {
+          root.localStorage.setItem(storageKey, JSON.stringify(arr));
+          return;
+        } catch (e) {
+          map.delete(arr.shift().k); // storage full: drop the oldest entry and retry
+        }
+      }
+    }
+
+    return {
+      get: function (key) {
+        var hit = map.get(key);
+        if (!hit) return null;
+        if (Date.now() - hit.time > ttlFor(hit.value)) {
+          map.delete(key);
+          save();
+          return null;
+        }
+        return hit.value;
+      },
+      set: function (key, value) {
+        map.delete(key);
+        map.set(key, { time: Date.now(), value: value });
+        while (map.size > maxEntries) map.delete(map.keys().next().value);
+        save();
+      },
+      size: function () {
+        return map.size;
+      },
+    };
+  }
+
+    // ==========================================================================
+  // 4. LYRICS HELPERS  (data comes from LRCLIB, see main.js)
+  // ==========================================================================
+  var TITLE_JUNK_RE =
+    /\s*[\(\[\{][^\)\]\}]*(official|lyric|audio|video|visuali[sz]er|m\/v|\bmv\b|\bhd\b|4k|remaster|explicit|full version)[^\)\]\}]*[\)\]\}]/gi;
+  var FEAT_BRACKET_RE = /\s*[\(\[]\s*(ft\.?|feat\.?|featuring)\b[^\)\]]*[\)\]]/gi;
+
+  /** "Song (Official Video) [4K] ft. X" -> "Song" */
+  function cleanTrackTitle(title) {
+    return String(title || "")
+      .replace(/[（［｛]/g, "(")
+      .replace(/[）］｝]/g, ")")
+      .replace(TITLE_JUNK_RE, "")
+      .replace(FEAT_BRACKET_RE, "")
+      .replace(/\s*[|｜].*$/, "")
+      .replace(/\s+(featuring|feat|ft)\b\.?.*$/i, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /** Best guess of {track, artist} for a lyrics search. Handles "Artist - Title" titles. */
+  function norm(s) {
+    return String(s || "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  }
+
+  function sameName(a, b) {
+    a = norm(a); b = norm(b);
+    return !!a && !!b && (a === b || a.indexOf(b) !== -1 || b.indexOf(a) !== -1);
+  }
+
+  function lyricsQuery(song) {
+    var channel = cleanArtist(song.artist || song.uploader || "");
+    if (/^unknown artist$/i.test(channel)) channel = "";
+    var full = cleanTrackTitle(song.track || song.title || "");
+    var track = full, artist = channel, alt = null;
+
+    var m = full.match(/^(.+?)\s+[-–—]\s+(.+)$/);
+    if (m) {
+      var left = m[1].trim(), right = m[2].trim();
+      if (channel && sameName(channel, right) && !sameName(channel, left)) {
+        artist = right; track = left;            // "Title - Artist"
+      } else if (channel && sameName(channel, left) && !sameName(channel, right)) {
+        artist = left; track = right;            // "Artist - Title"
+      } else {
+        artist = left; track = right;            // unsure: default, but keep the swap as a fallback
+        alt = { track: left, artist: right };
+      }
+    }
+    return { track: track, artist: artist, channel: channel, full: full, alt: alt };
+  }
+
+    /** Removes hearts, stars, emoji and full-width brackets that break lyric searches. */
+  function tidy(s) {
+    return String(s || "")
+      .replace(/[（［｛]/g, "(")
+      .replace(/[）］｝]/g, ")")
+      .replace(/[^\p{L}\p{N}\s'&.,!?()\-]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /** Several possible track names and artist names to try, best guess first. */
+  function lyricsCandidates(song) {
+    var base = lyricsQuery(song);
+    var tracks = [];
+    var artists = [];
+    function add(list, v) {
+      v = tidy(v);
+      if (v && list.indexOf(v) === -1) list.push(v);
+    }
+
+    // "Song / Artist" style titles: the first piece is usually the song
+    var pieces = base.full.split(/\s*\/\s*/);
+    if (pieces.length > 1) add(tracks, pieces[0]);
+    add(tracks, base.track);
+    if (base.alt) add(tracks, base.alt.track);
+
+    [base.artist, base.channel, base.alt && base.alt.artist].forEach(function (a) {
+      add(artists, a);
+      String(a || "")
+        .split(/\s*[\/&,]\s*|\s+(?:feat\.?|ft\.?|x)\s+/i)
+        .forEach(function (p) { add(artists, p); });
+    });
+
+    return { tracks: tracks, artists: artists, full: base.full };
+  }
+
+  function parseLrc(text) {
+    var out = [];
+    String(text || "")
+      .split(/\r?\n/)
+      .forEach(function (line) {
+        var re = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+        var times = [];
+        var last = 0;
+        var m;
+        while ((m = re.exec(line))) {
+          times.push(Number(m[1]) * 60 + Number(m[2]) + (m[3] ? Number("0." + m[3]) : 0));
+          last = re.lastIndex;
+        }
+        if (!times.length) return;
+        var words = line.slice(last).trim();
+        times.forEach(function (t) {
+          out.push({ t: t, text: words });
+        });
+      });
+    out.sort(function (a, b) {
+      return a.t - b.t;
+    });
+    return out;
+  }
+
+  /**
+   * Chooses the best LRCLIB record: time-synced first, and its length must match the
+   * song (a different length = live / remix / other song, so the timing would be wrong).
+   * Records that do not match the length can still be used as plain, un-synced text.
+   */
+  function pickLyrics(list, duration) {
+    if (!Array.isArray(list)) list = list ? [list] : [];
+    var usable = list.filter(function (x) {
+      return x && !x.instrumental && (x.syncedLyrics || x.plainLyrics);
+    });
+    if (!usable.length) return null;
+
+    var dur = Number(duration) > 0 ? Number(duration) : 0;
+    var close = dur
+      ? usable.filter(function (x) {
+          return !x.duration || Math.abs(x.duration - dur) <= 8;
+        })
+      : usable;
+
+    if (close.length) {
+      close = close.slice().sort(function (a, b) {
+        var synced = (b.syncedLyrics ? 1 : 0) - (a.syncedLyrics ? 1 : 0);
+        if (synced) return synced;
+        return dur ? Math.abs((a.duration || dur) - dur) - Math.abs((b.duration || dur) - dur) : 0;
+      });
+      return close[0];
+    }
+
+    var plain = usable.filter(function (x) {
+      return x.plainLyrics;
+    })[0];
+    return plain ? { plainLyrics: plain.plainLyrics, duration: plain.duration } : null;
+  }
+
+  /** LRCLIB record -> {synced, lines:[{t,text}], instrumental?} or null. */
+  function lyricsFromRecord(rec) {
+    if (!rec) return null;
+    if (rec.syncedLyrics) {
+      var lines = parseLrc(rec.syncedLyrics);
+      if (lines.length) return { synced: true, lines: lines };
+    }
+    if (rec.plainLyrics) {
+      return {
+        synced: false,
+        lines: String(rec.plainLyrics)
+          .split(/\r?\n/)
+          .map(function (t) {
+            return { t: null, text: t.trim() };
+          }),
+      };
+    }
+    return null; // instrumental or empty record = nothing to show
+  }
+
+  /** Index of the line being sung at `time` (last line whose start <= time), or -1. */
+  function activeLine(lines, time) {
+    var lo = 0;
+    var hi = lines.length - 1;
+    var found = -1;
+    while (lo <= hi) {
+      var mid = (lo + hi) >> 1;
+      if (lines[mid].t <= time) {
+        found = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return found;
+  }
+
   var api = {
+    
     THEME_KEY: THEME_KEY,
     initialTheme: initialTheme,
     parseLines: parseLines,
@@ -278,6 +510,14 @@
     loadHistory: loadHistory,
     saveHistory: saveHistory,
     createCache: createCache,
+    createStoredCache: createStoredCache,
+    cleanTrackTitle: cleanTrackTitle,
+    lyricsQuery: lyricsQuery,
+    parseLrc: parseLrc,
+    pickLyrics: pickLyrics,
+    lyricsFromRecord: lyricsFromRecord,
+    activeLine: activeLine,
+    lyricsCandidates: lyricsCandidates,
   };
 
   root.AstralisUtils = api;
