@@ -701,3 +701,256 @@ button img {
   border: 1px solid var(--gold-detail);
 }
 .download-btn[data-done] { opacity: 1; }
+
+/* ============================================================================
+   PHASE 4 ADDITIONS  (paste at the very end of styles.css)
+   1. Layout for the custom title bar     2. Title bar
+   3. Search: history chips, skeleton, states     4. Light / dark theme
+   ============================================================================ */
+
+/* ---------- 1. Layout: the title bar takes the top, the app fills the rest ---------- */
+:root {
+  --titlebar-h: 38px;
+  --tb-bg: rgba(244, 243, 238, 0.72);
+  --tb-line: rgba(141, 153, 174, 0.35);
+  --tb-hover: rgba(141, 153, 174, 0.2);
+  --chip-bg: rgba(141, 153, 174, 0.16);
+  --chip-line: rgba(141, 153, 174, 0.4);
+  --skeleton-a: rgba(141, 153, 174, 0.3);
+  --skeleton-b: rgba(141, 153, 174, 0.55);
+}
+
+body { display: flex; flex-direction: column; height: 100vh; }
+.app-container { flex: 1; min-height: 0; height: auto; }
+.content-section { min-height: 0; }
+.view-area { flex: 1; min-height: 0; height: auto; }
+
+/* ---------- 2. Title bar ---------- */
+.titlebar {
+  position: relative;
+  z-index: 200; /* stays above modal overlays so the window can always be moved / closed */
+  flex: 0 0 var(--titlebar-h);
+  height: var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px 0 16px;
+  background: var(--tb-bg);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--tb-line);
+}
+.titlebar-brand { display: flex; align-items: center; gap: 10px; pointer-events: none; }
+.titlebar-logo { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; }
+.titlebar-name {
+  font-family: "Azeret Mono", "Consolas", monospace;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--text-primary);
+  opacity: 0.85;
+}
+.titlebar-name i { font-style: normal; color: var(--gold-detail); margin: 0 6px; }
+
+.titlebar-actions { display: flex; align-items: center; gap: 2px; }
+.tb-btn {
+  width: 36px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color 0.18s ease, color 0.18s ease;
+}
+.tb-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tb-btn:hover { background: var(--tb-hover); }
+.tb-btn.close:hover { background: #c95c5c; color: #fff; }
+.tb-sep { width: 1px; height: 16px; margin: 0 6px; background: var(--tb-line); }
+
+/* Icon swaps: sun/moon, fullscreen enter/exit, maximize/restore */
+.icon-sun, .icon-fs-exit, .icon-restore { display: none; }
+html[data-theme="dark"] .icon-sun { display: block; }
+html[data-theme="dark"] .icon-moon { display: none; }
+body.is-fullscreen .icon-fs-exit { display: block; }
+body.is-fullscreen .icon-fs-enter { display: none; }
+body.is-maximized .icon-restore { display: block; }
+body.is-maximized .icon-max { display: none; }
+
+/* ---------- 3. Search page ---------- */
+.song-dur { opacity: 0.75; font-weight: normal; }
+.remove-recent-btn { font-size: 0; }
+
+.search-history { margin: -8px 0 18px; flex-shrink: 0; }
+.search-history[hidden] { display: none; }
+.sh-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 0.7rem;
+  font-weight: bold;
+  letter-spacing: 2px;
+  opacity: 0.75;
+}
+.sh-clear {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font: inherit;
+  letter-spacing: 1px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.sh-chips { display: flex; flex-wrap: wrap; gap: 8px; max-height: 84px; overflow-y: auto; }
+.sh-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 6px 5px 14px;
+  border-radius: 999px;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-line);
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.2s ease;
+}
+.sh-chip:hover { background: var(--accent-color); transform: translateY(-1px); }
+.sh-text { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sh-x {
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font-size: 1rem;
+  line-height: 1;
+  opacity: 0.6;
+  cursor: pointer;
+}
+.sh-x:hover { opacity: 1; background: rgba(0, 0, 0, 0.14); }
+
+.skeleton-card {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 20px;
+  border-radius: 15px;
+  background: var(--skeleton-a);
+}
+.sk-cover, .sk-line {
+  background: linear-gradient(90deg, var(--skeleton-a), var(--skeleton-b), var(--skeleton-a));
+  background-size: 220% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+  border-radius: 10px;
+}
+.sk-cover { width: 60px; height: 60px; flex-shrink: 0; }
+.sk-lines { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.sk-line { height: 14px; }
+.sk-line.w70 { width: 70%; }
+.sk-line.w40 { width: 40%; height: 10px; }
+@keyframes shimmer {
+  0% { background-position: 110% 0; }
+  100% { background-position: -110% 0; }
+}
+
+.search-state { text-align: center; padding: 34px 10px; }
+.search-state p { line-height: 1.6; margin-bottom: 14px; }
+.search-state .hint { font-size: 0.85rem; opacity: 0.7; }
+
+/* ---------- 4. Dark theme ----------
+   Variables first, then fixes for the few places that had hard-coded light colours. */
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-home: #161826;
+  --bg-search: #141622;
+  --bg-playlist: #12141f;
+  --text-primary: #e8eaf4;
+  --accent-color: #2d3552;
+  --accent-dark: #3b4670;
+  --gold-detail: #d9bc8c;
+  --tb-bg: rgba(17, 19, 30, 0.8);
+  --tb-line: rgba(130, 145, 185, 0.25);
+  --tb-hover: rgba(130, 145, 185, 0.18);
+  --chip-bg: rgba(130, 145, 185, 0.14);
+  --chip-line: rgba(130, 145, 185, 0.35);
+  --skeleton-a: rgba(70, 84, 128, 0.35);
+  --skeleton-b: rgba(110, 128, 180, 0.55);
+}
+
+/* glass panels */
+html[data-theme="dark"] .glass-panel { background-color: rgba(26, 29, 44, 0.66); border-color: rgba(130, 145, 185, 0.28); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); }
+html[data-theme="dark"] .glass-panel-right { background-color: rgba(24, 27, 41, 0.8); border-color: rgba(130, 145, 185, 0.22); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35); }
+html[data-theme="dark"] .glass-panel-controls { background-color: rgba(26, 29, 44, 0.45); border-color: rgba(130, 145, 185, 0.22); }
+html[data-theme="dark"] .volume-popover { background-color: rgba(28, 31, 48, 0.96); border-color: rgba(130, 145, 185, 0.3); }
+html[data-theme="dark"] .theme-controls { background-color: rgba(26, 29, 44, 0.5); border-color: rgba(130, 145, 185, 0.25); }
+html[data-theme="dark"] .confirm-modal { background: rgba(26, 29, 44, 0.96); border-color: rgba(130, 145, 185, 0.3); }
+html[data-theme="dark"] .progress-ring__track { stroke: #3a4263; }
+
+/* text that used the accent colour as a heading colour */
+html[data-theme="dark"] .view-title,
+html[data-theme="dark"] .playlist-big-title { color: #9db0da; }
+html[data-theme="dark"] .title-divider { background-color: #56648a; }
+html[data-theme="dark"] .clock-date { color: #9db0da; }
+
+/* the icon PNGs are dark: flip them to white on dark surfaces */
+html[data-theme="dark"] .controls button img,
+html[data-theme="dark"] .volume-trigger-btn img,
+html[data-theme="dark"] .theme-btn img,
+html[data-theme="dark"] .action-btn img,
+html[data-theme="dark"] .back-btn img,
+html[data-theme="dark"] .playlist-option-btn > img { filter: invert(1); }
+
+/* buttons with a light fill: dark icon instead of white */
+html[data-theme="dark"] .search-btn img,
+html[data-theme="dark"] .create-playlist-btn img { filter: brightness(0); }
+html[data-theme="dark"] .search-btn:hover img,
+html[data-theme="dark"] .create-playlist-btn:hover img { filter: brightness(0) invert(1); }
+html[data-theme="dark"] .create-playlist-btn:hover { color: #fff; }
+
+html[data-theme="dark"] .search-input { color: var(--text-primary); }
+html[data-theme="dark"] .search-input::placeholder { color: var(--text-primary); opacity: 0.55; }
+
+/* borders that were too dim */
+html[data-theme="dark"] .controls button,
+html[data-theme="dark"] .volume-trigger-btn,
+html[data-theme="dark"] .theme-btn,
+html[data-theme="dark"] .back-btn { border-color: #6a79a3; }
+html[data-theme="dark"] .playlist-folder-card { border-color: #56648a; }
+html[data-theme="dark"] .playlist-folder-card:hover { color: var(--text-primary); }
+
+/* song cards */
+html[data-theme="dark"] .song-card .song-title,
+html[data-theme="dark"] .song-card .song-artist { color: var(--text-primary); }
+html[data-theme="dark"] .song-card:hover { box-shadow: -5px 5px 15px rgba(0, 0, 0, 0.35); }
+html[data-theme="dark"] .song-card.now-playing-active {
+  background-color: #4a5a96 !important;
+  border-color: var(--gold-detail);
+  box-shadow: 0 0 14px rgba(120, 140, 220, 0.35);
+}
+html[data-theme="dark"] .dl-badge { background: rgba(10, 12, 22, 0.7); color: #e8d3a8; }
+
+/* modals */
+html[data-theme="dark"] .modal-overlay { background: rgba(0, 0, 0, 0.6); }
+html[data-theme="dark"] .modal-content { background-color: #1c2033; border-color: #56648a; }
+html[data-theme="dark"] .modal-content input,
+html[data-theme="dark"] .modal-content textarea { border-color: #56648a; }
+html[data-theme="dark"] .playlist-option-btn { border-color: #56648a; }
+html[data-theme="dark"] .playlist-option-btn:hover { color: #fff; }
+html[data-theme="dark"] .cancel-btn { border-color: #6a79a3 !important; }
+
+/* scrollbars */
+html[data-theme="dark"] .playlist-container::-webkit-scrollbar-thumb,
+html[data-theme="dark"] .playlist-options-container::-webkit-scrollbar-thumb { background-color: #56648a; }

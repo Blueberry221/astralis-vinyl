@@ -95,13 +95,23 @@ fn promote_to_library_in(base: &Path, id: &str) -> Result<Option<PathBuf>, Strin
     Ok(None)
 }
 
-/// Deletes expired files from the cache folder. Returns how many were removed.
+/// Cleans the cache folder. Removes (1) expired files and (2) songs that are
+/// already saved in the library (the permanent copy makes the temporary one
+/// pointless). Returns how many files were removed.
 fn cleanup_cache_in(base: &Path) -> usize {
+    let lib = base.join("library");
     let mut removed = 0;
     if let Ok(entries) = fs::read_dir(base.join("cache")) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && is_expired(&path) && fs::remove_file(&path).is_ok() {
+            if !path.is_file() {
+                continue;
+            }
+            let duplicate = path
+                .file_name()
+                .map(|name| is_usable(&lib.join(name)))
+                .unwrap_or(false);
+            if (duplicate || is_expired(&path)) && fs::remove_file(&path).is_ok() {
                 removed += 1;
             }
         }
@@ -162,6 +172,61 @@ fn delete_audio_in(base: &Path, id: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Percent-encodes a search query for use inside a URL (no extra crates needed).
+fn percent_encode(input: &str) -> String {
+    let mut out = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+/// Builds the yt-dlp arguments for a search.
+///  - "music":   YouTube Music, "Songs" section only (no random videos)
+///  - anything else: normal YouTube search (the UI filters non-music itself)
+/// "--flat-playlist" returns the result list without opening every video,
+/// which is what makes this much faster than the old "--dump-json" search.
+fn search_args(query: &str, source: &str) -> Result<Vec<String>, String> {
+    let cleaned: String = query.chars().filter(|c| !c.is_control()).collect();
+    let q: String = cleaned.trim().chars().take(200).collect();
+    if q.is_empty() {
+        return Err("Empty query".to_string());
+    }
+
+    // The target always starts with "https://" or "ytsearch", so a query that
+    // begins with "-" can never be mistaken for a yt-dlp option.
+    let target = if source == "music" {
+        format!(
+            "https://music.youtube.com/search?q={}#songs",
+            percent_encode(&q)
+        )
+    } else {
+        format!("ytsearch20:{}", q)
+    };
+
+    let mut args: Vec<String> = [
+        "--flat-playlist",
+        "-j",
+        "--no-warnings",
+        "--ignore-errors",
+        "--socket-timeout",
+        "10",
+        "--playlist-end",
+        "20",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.push(target);
+    Ok(args)
+}
+
 // <<PURE-END>>
 
 use std::process::Command;
@@ -268,19 +333,16 @@ fn path_string(path: PathBuf) -> String {
 /// 1. AUDIO SEARCH  (async: the window stays responsive)
 /// =========================================================
 #[tauri::command]
-async fn search_song(app: AppHandle, query: String) -> Result<String, String> {
-    let query = query.trim().to_string();
-    if query.is_empty() {
-        return Err("Empty query".to_string());
-    }
+async fn search_song(
+    app: AppHandle,
+    query: String,
+    source: Option<String>,
+) -> Result<String, String> {
+    let args = search_args(&query, source.as_deref().unwrap_or("youtube"))?;
 
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let mut cmd = yt_command(&app)?;
-        cmd.arg(format!("ytsearch5:{}", query)).args([
-            "--dump-json",
-            "--no-playlist",
-            "--ignore-errors",
-        ]);
+        cmd.args(&args);
 
         let output = cmd
             .output()

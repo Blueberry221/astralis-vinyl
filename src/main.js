@@ -7,7 +7,7 @@
  * 2. Data Structures (STATE, DOM, DATABASE)
  * 3. Utility & Core Services
  * 4. Audio Processing Engine
- * 5. Layout & UI Renderers
+ * 5. Layout & UI Renderers (+ 5b. Search)
  * 6. Hardware & Media Events Bindings
  * 7. Visual Decorators (Clock, Quotes, Particles)
  * 8. Bootstrapper
@@ -27,6 +27,7 @@ document.addEventListener("contextmenu", (event) => {
 /** Escapes text before it is placed inside innerHTML (prevents broken UI / injection). */
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const U = window.AstralisUtils; // from utils.js (loaded before this file)
 document.addEventListener("DOMContentLoaded", async () => {
   // ==========================================================================
   // 2. DATA STRUCTURES
@@ -53,6 +54,19 @@ document.addEventListener("DOMContentLoaded", async () => {
   const DATABASE = {
     userPlaylists: [],
     recentSongs: [],
+  };
+
+  /** * Search page state (kept while you switch tabs, so results are not lost)
+   */
+  const SEARCH = {
+    query: "",
+    status: "idle", // 'idle' | 'loading' | 'done' | 'error'
+    results: [],
+    error: "",
+    token: 0, // increases on every search; results of older searches are ignored
+    history: U.loadHistory(),
+    cache: U.createCache(10 * 60 * 1000, 30), // same query within 10 min = instant
+    musicFails: 0, // after 2 failures in a row YouTube Music search is skipped for this session
   };
 
   /** * DOM Element Caching
@@ -111,9 +125,10 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Triggers custom asynchronous confirm dialog interface.
    * @param {string} title - The header title of the modal.
    * @param {string} message - The message body prompt.
+   * @param {string} okLabel - Text of the confirm button (default "Delete").
    * @return {Promise<boolean>} True if user confirms, false otherwise.
    */
-  function customConfirm(title, message) {
+  function customConfirm(title, message, okLabel = "Delete") {
     return new Promise((resolve) => {
       const modal = document.getElementById("confirm-modal");
       document.getElementById("confirm-title").textContent = title;
@@ -122,6 +137,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       const okBtn = document.getElementById("confirm-ok");
       const cancelBtn = document.getElementById("confirm-cancel");
+      okBtn.textContent = okLabel;
 
       const cleanup = () => {
         modal.style.display = "none";
@@ -149,6 +165,15 @@ document.addEventListener("DOMContentLoaded", async () => {
       await invoke("save_db", { data: JSON.stringify(DATABASE.userPlaylists) });
     } catch (err) {
       console.error("Database Save Error:", err);
+    }
+  };
+
+  /** Saves the recent-songs list (localStorage). */
+  const persistRecent = () => {
+    try {
+      localStorage.setItem("astralis_recent", JSON.stringify(DATABASE.recentSongs));
+    } catch (err) {
+      console.error("Could not save recent songs:", err);
     }
   };
 
@@ -232,12 +257,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         // isPlaying / vinyl / play icon are updated by the audio "play" event listener
         document.getElementById("np-artist").textContent = artist;
 
-        // Push to Recent History
+        // Push to Recent History (compact copy: id, title, artist, thumbnail, duration)
         DATABASE.recentSongs = DATABASE.recentSongs.filter((s) => s.id !== song.id);
-        DATABASE.recentSongs.unshift(song);
+        DATABASE.recentSongs.unshift(U.compactSong(song));
         if (DATABASE.recentSongs.length > 10) DATABASE.recentSongs.pop();
-
-        localStorage.setItem("astralis_recent", JSON.stringify(DATABASE.recentSongs));
+        persistRecent();
       } catch (error) {
         if (token !== STATE.playToken) return; // ignore errors from superseded requests
         document.getElementById("np-artist").textContent = "❌ Failed to play";
@@ -264,11 +288,27 @@ document.addEventListener("DOMContentLoaded", async () => {
     setTimeout(() => {
       if (page === "home") {
         DOM.dynamicContent.innerHTML = `
-          <h1 class="view-title">RECENT SONGS</h1>
-          <hr class="title-divider" />
+          <div class="playlist-header-actions">
+            <div><h1 class="view-title">RECENT SONGS</h1><hr class="title-divider" style="margin-bottom:0;"/></div>
+            ${DATABASE.recentSongs.length ? `<button class="create-playlist-btn" id="clear-recent-btn">Clear all</button>` : ""}
+          </div>
           <div class="playlist-container" id="recent-container"></div>
         `;
         renderPlaylistCards(DATABASE.recentSongs, document.getElementById("recent-container"), "home", "recent");
+
+        const clearBtn = document.getElementById("clear-recent-btn");
+        if (clearBtn)
+          clearBtn.onclick = async () => {
+            const ok = await customConfirm(
+              "Clear Recent Songs",
+              "Remove every song from this list? Your downloads and playlists are not affected.",
+              "Clear"
+            );
+            if (!ok) return;
+            DATABASE.recentSongs = [];
+            persistRecent();
+            renderPage("home");
+          };
       } else if (page === "playlist") {
         DOM.dynamicContent.innerHTML = `
           <div class="playlist-header-actions">
@@ -315,44 +355,13 @@ document.addEventListener("DOMContentLoaded", async () => {
           <h1 class="view-title">SEARCH</h1>
           <hr class="title-divider" />
           <div class="search-container">
-            <input type="text" id="search-input" class="search-input" placeholder="Search on YouTube..." autocomplete="off" />
-            <button id="search-btn" class="search-btn"><img src="assets/search.png" alt="Search"></button>
+            <input type="text" id="search-input" class="search-input" placeholder="Search for a song or an artist..." autocomplete="off" spellcheck="false" maxlength="200" />
+            <button id="search-btn" class="search-btn" aria-label="Search"><img src="assets/search.png" alt="Search"></button>
           </div>
+          <div id="search-history" class="search-history" hidden></div>
           <div id="search-results-container" class="playlist-container"></div>
         `;
-
-        document.getElementById("search-btn").onclick = async () => {
-          const q = document.getElementById("search-input").value.trim();
-          if (!q) return;
-          const container = document.getElementById("search-results-container");
-          container.innerHTML = `<p style="text-align:center;">Searching... ⏳</p>`;
-          try {
-            const raw = await invoke("search_song", { query: q });
-            // Parse line by line: one malformed line must not break the whole search
-            const res = raw
-              .trim()
-              .split("\n")
-              .filter((l) => l.trim())
-              .map((l) => {
-                try {
-                  return JSON.parse(l);
-                } catch {
-                  return null;
-                }
-              })
-              .filter((s) => s && s.id);
-            if (res.length === 0) {
-              container.innerHTML = `<p style="opacity:0.7; font-style:italic;">No results found.</p>`;
-              return;
-            }
-            renderPlaylistCards(res, container, "search");
-          } catch (e) {
-            container.innerHTML = `<p style="color:red;text-align:center;">Failed to search.</p>`;
-          }
-        };
-        document.getElementById("search-input").onkeypress = (e) => {
-          if (e.key === "Enter") document.getElementById("search-btn").click();
-        };
+        initSearchPage();
       }
       DOM.dynamicContent.style.opacity = 1;
     }, 400);
@@ -426,14 +435,18 @@ document.addEventListener("DOMContentLoaded", async () => {
       let cover = song.thumbnail || song.cover || "";
       if (!cover && song.thumbnails && song.thumbnails.length > 0) cover = song.thumbnails[song.thumbnails.length - 1].url;
 
+      const durationText = U.formatDuration(song.duration);
       const isDownloaded = STATE.localIds.has(song.id);
       const showBadge = isDownloaded && !(viewContext === "playlist" && playlistId === "downloaded");
 
+      const downloadBtnHTML = `<button class="action-btn download-btn" title="${isDownloaded ? "Downloaded" : "Download (keep permanently)"}"><img src="assets/${isDownloaded ? "check" : "download"}.png"></button>`;
+      const addBtnHTML = `<button class="action-btn add-btn" title="Add to playlist"><img src="assets/more.png"></button>`;
+
       let actionButtonsHTML = "";
       if (viewContext === "search") {
-        actionButtonsHTML = `<button class="action-btn download-btn"><img src="assets/${isDownloaded ? "check" : "download"}.png"></button><button class="action-btn add-btn"><img src="assets/more.png"></button>`;
+        actionButtonsHTML = downloadBtnHTML + addBtnHTML;
       } else if (viewContext === "home") {
-        actionButtonsHTML = `<button class="action-btn add-btn"><img src="assets/more.png"></button>`;
+        actionButtonsHTML = downloadBtnHTML + addBtnHTML + `<button class="action-btn remove-recent-btn" title="Remove from recent"><img src="assets/close.png"></button>`;
       } else {
         actionButtonsHTML = `<button class="action-btn delete-btn"><img src="assets/delete.png"></button>`;
       }
@@ -445,7 +458,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         <img src="${esc(cover)}" class="song-cover">
         <div class="song-info">
           <span class="song-title">${esc(title)}</span>
-          <span class="song-artist">${esc(artist)}</span>
+          <span class="song-artist">${esc(artist)}${durationText ? `<span class="song-dur"> · ${durationText}</span>` : ""}</span>
           ${showBadge ? DL_BADGE_HTML : ""}
         </div>
         <div class="song-actions">${actionButtonsHTML}</div>
@@ -472,7 +485,7 @@ document.addEventListener("DOMContentLoaded", async () => {
               DATABASE.userPlaylists.unshift(dlPlaylist);
             }
             if (!dlPlaylist.songs.some((s) => s.id === song.id)) {
-              dlPlaylist.songs.push(song);
+              dlPlaylist.songs.push(U.compactSong(song));
               await saveDatabase();
             }
             STATE.localIds.add(song.id);
@@ -487,6 +500,17 @@ document.addEventListener("DOMContentLoaded", async () => {
           }
         };
       }
+
+      const rmBtn = card.querySelector(".remove-recent-btn");
+      if (rmBtn)
+        rmBtn.onclick = (e) => {
+          e.stopPropagation();
+          DATABASE.recentSongs = DATABASE.recentSongs.filter((s) => s.id !== song.id);
+          persistRecent();
+          card.remove();
+          // Last one removed: redraw the page (empty message, "Clear all" button disappears)
+          if (!container.querySelector(".song-card")) renderPage("home");
+        };
 
       const addBtn = card.querySelector(".add-btn");
       if (addBtn)
@@ -504,7 +528,7 @@ document.addEventListener("DOMContentLoaded", async () => {
               if (isAdded) btn.classList.add("success");
               btn.onclick = async () => {
                 if (!pl.songs.some((s) => s.id === song.id)) {
-                  pl.songs.push(STATE.activeSongToSave);
+                  pl.songs.push(U.compactSong(STATE.activeSongToSave));
                   await saveDatabase();
                   btn.classList.add("success");
                   btn.innerHTML = `<span><img src="assets/icon.jpg" style="width:16px; margin-right:8px; vertical-align:middle;"> ${esc(pl.name)}</span> <img src="assets/check.png">`;
@@ -523,7 +547,8 @@ document.addEventListener("DOMContentLoaded", async () => {
           const fromDownloads = playlistId === "downloaded";
           const ok = await customConfirm(
             fromDownloads ? "Delete Download" : "Remove Song",
-            fromDownloads ? `Delete "${title}" from your device?` : `Remove "${title}" from this playlist?`
+            fromDownloads ? `Delete "${title}" from your device?` : `Remove "${title}" from this playlist?`,
+            fromDownloads ? "Delete" : "Remove"
           );
           if (!ok) return;
 
@@ -584,6 +609,166 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       container.appendChild(card);
     });
+  }
+
+  // ==========================================================================
+  // 5b. SEARCH  (history, result cache, skeleton loading, music-first + fallback)
+  // ==========================================================================
+
+  const skeletonHTML = (count = 6) =>
+    Array.from(
+      { length: count },
+      () => `<div class="skeleton-card"><div class="sk-cover"></div><div class="sk-lines"><div class="sk-line w70"></div><div class="sk-line w40"></div></div></div>`
+    ).join("");
+
+  const friendlySearchError = (err) =>
+    /failed to run yt-dlp/i.test(String(err))
+      ? "The search engine (yt-dlp) could not start."
+      : "Search failed. Check your internet connection and try again.";
+
+  /**
+   * Gets songs for a query. YouTube Music ("Songs" only) is tried first so you do not
+   * get random videos; normal YouTube search (filtered) is the fallback.
+   */
+  async function fetchSongs(query) {
+    const key = query.toLowerCase();
+    const cached = SEARCH.cache.get(key);
+    if (cached) return cached;
+
+    let results = [];
+    if (SEARCH.musicFails < 2) {
+      try {
+        const raw = await invoke("search_song", { query, source: "music" });
+        results = U.processSearch(raw, "music", query);
+        SEARCH.musicFails = 0;
+      } catch (err) {
+        SEARCH.musicFails++;
+        console.warn("YouTube Music search failed, falling back to YouTube:", err);
+      }
+    }
+    if (results.length === 0) {
+      const raw = await invoke("search_song", { query, source: "youtube" });
+      results = U.processSearch(raw, "youtube", query);
+    }
+    if (results.length > 0) SEARCH.cache.set(key, results);
+    return results;
+  }
+
+  /** Draws the search results area from SEARCH.status. Safe to call when the tab is not open. */
+  function paintSearch() {
+    const box = document.getElementById("search-results-container");
+    if (!box) return; // user is on another tab: it is drawn again when they come back
+
+    if (SEARCH.status === "loading") {
+      box.innerHTML = skeletonHTML();
+    } else if (SEARCH.status === "error") {
+      box.innerHTML = `<div class="search-state"><p>${esc(SEARCH.error)}</p><button class="create-playlist-btn" id="search-retry" style="margin:0 auto;">Try again</button></div>`;
+      document.getElementById("search-retry").onclick = () => doSearch(SEARCH.query);
+    } else if (SEARCH.status === "done") {
+      if (SEARCH.results.length === 0) {
+        box.innerHTML = `<div class="search-state"><p>No songs found for “${esc(SEARCH.query)}”.</p><p class="hint">Try the song title together with the artist name.</p></div>`;
+      } else {
+        renderPlaylistCards(SEARCH.results, box, "search");
+      }
+    } else {
+      box.innerHTML = `<div class="search-state"><p>Search for a song or an artist.</p><p class="hint">Songs first: YouTube Music is searched before regular YouTube.</p></div>`;
+    }
+  }
+
+  async function doSearch(rawQuery) {
+    const query = String(rawQuery || "").trim().replace(/\s+/g, " ").slice(0, 200);
+    if (!query) return;
+    if (SEARCH.status === "loading" && SEARCH.query.toLowerCase() === query.toLowerCase()) return; // already running
+
+    const input = document.getElementById("search-input");
+    if (input) input.value = query;
+    const historyBox = document.getElementById("search-history");
+    if (historyBox) historyBox.hidden = true;
+
+    SEARCH.query = query;
+    SEARCH.status = "loading";
+    SEARCH.results = [];
+    const token = ++SEARCH.token;
+    paintSearch();
+
+    try {
+      const results = await fetchSongs(query);
+      if (token !== SEARCH.token) return; // a newer search was started meanwhile
+      SEARCH.results = results;
+      SEARCH.status = "done";
+      if (results.length > 0) {
+        SEARCH.history = U.addToHistory(SEARCH.history, query);
+        U.saveHistory(SEARCH.history);
+      }
+    } catch (err) {
+      if (token !== SEARCH.token) return;
+      console.error("Search error:", err);
+      SEARCH.status = "error";
+      SEARCH.error = friendlySearchError(err);
+    }
+    paintSearch();
+  }
+
+  /** Recent-search chips under the search box (filtered by what is typed). */
+  function renderSearchHistory() {
+    const box = document.getElementById("search-history");
+    const input = document.getElementById("search-input");
+    if (!box || !input) return;
+
+    const typed = input.value.trim().toLowerCase();
+    const visible = document.activeElement === input || SEARCH.status === "idle";
+    const items = SEARCH.history.filter((h) => h.toLowerCase() !== typed && h.toLowerCase().includes(typed));
+    if (!visible || items.length === 0) {
+      box.hidden = true;
+      return;
+    }
+
+    box.hidden = false;
+    box.innerHTML = `
+      <div class="sh-head"><span>RECENT SEARCHES</span><button class="sh-clear" id="sh-clear">Clear</button></div>
+      <div class="sh-chips">${items
+        .map(
+          (h) =>
+            `<span class="sh-chip" data-q="${esc(h)}"><span class="sh-text">${esc(h)}</span><button class="sh-x" data-del="${esc(h)}" aria-label="Remove ${esc(h)} from history" title="Remove">×</button></span>`
+        )
+        .join("")}</div>`;
+  }
+
+  function initSearchPage() {
+    const input = document.getElementById("search-input");
+    const box = document.getElementById("search-history");
+    input.value = SEARCH.query; // coming back from another tab keeps your last search
+
+    document.getElementById("search-btn").onclick = () => doSearch(input.value);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") doSearch(input.value);
+    });
+    input.addEventListener("focus", renderSearchHistory);
+    input.addEventListener("input", renderSearchHistory);
+    input.addEventListener("blur", () => setTimeout(renderSearchHistory, 0));
+
+    box.addEventListener("mousedown", (e) => e.preventDefault()); // keep the cursor in the input
+    box.addEventListener("click", (e) => {
+      const del = e.target.closest("[data-del]");
+      if (del) {
+        SEARCH.history = SEARCH.history.filter((h) => h !== del.dataset.del);
+        U.saveHistory(SEARCH.history);
+        renderSearchHistory();
+        return;
+      }
+      if (e.target.closest("#sh-clear")) {
+        SEARCH.history = [];
+        U.saveHistory(SEARCH.history);
+        renderSearchHistory();
+        return;
+      }
+      const chip = e.target.closest("[data-q]");
+      if (chip) doSearch(chip.dataset.q);
+    });
+
+    paintSearch();
+    renderSearchHistory();
+    if (SEARCH.status === "idle") input.focus();
   }
 
   // ==========================================================================
@@ -839,6 +1024,66 @@ document.addEventListener("DOMContentLoaded", async () => {
     setTimeout(() => note.remove(), 5000);
   }
   setInterval(emitFlyingNote, 800);
+
+  // ==========================================================================
+  // 7b. TITLE BAR (frameless window) & LIGHT / DARK THEME
+  // ==========================================================================
+  const appWindow = window.__TAURI__?.window?.getCurrentWindow?.() ?? null;
+
+  const setTheme = (theme) => {
+    document.documentElement.setAttribute("data-theme", theme);
+    try {
+      localStorage.setItem(U.THEME_KEY, theme);
+    } catch {
+      /* storage unavailable: the choice just will not be remembered */
+    }
+  };
+  document.getElementById("theme-toggle-btn").addEventListener("click", () => {
+    setTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+  });
+
+  /** Keeps the maximize / fullscreen icons in sync with the real window state. */
+  const syncWindowState = async () => {
+    if (!appWindow) return;
+    try {
+      document.body.classList.toggle("is-maximized", await appWindow.isMaximized());
+      document.body.classList.toggle("is-fullscreen", await appWindow.isFullscreen());
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const toggleFullscreen = async () => {
+    if (!appWindow) return;
+    try {
+      await appWindow.setFullscreen(!(await appWindow.isFullscreen()));
+    } catch (err) {
+      console.error(err);
+    }
+    syncWindowState();
+  };
+
+  const onClick = (id, fn) =>
+    document.getElementById(id).addEventListener("click", () => Promise.resolve(fn()).catch(console.error));
+  onClick("win-min", () => appWindow?.minimize());
+  onClick("win-max", async () => {
+    await appWindow?.toggleMaximize();
+    syncWindowState();
+  });
+  onClick("win-close", () => appWindow?.close());
+  onClick("fullscreen-btn", toggleFullscreen);
+
+  appWindow?.onResized?.(syncWindowState);
+  syncWindowState();
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "F11") {
+      e.preventDefault();
+      toggleFullscreen();
+    } else if (e.key === "Escape" && document.body.classList.contains("is-fullscreen")) {
+      toggleFullscreen();
+    }
+  });
 
   // ==========================================================================
   // 8. BOOTSTRAPPER
