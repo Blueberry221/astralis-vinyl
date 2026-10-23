@@ -1175,3 +1175,152 @@ html[data-theme="dark"] .card-spin {
   .lyrics-panel { padding: 22px 28px 14px; }
   .ly-line { font-size: 1.05rem; }
 }
+
+/* ============================================================================
+   PHASE 7 ADDITIONS  (paste at the very end of styles.css, after the Phase 5 block)
+   ============================================================================ */
+
+/* ---------- 1. Shuffle button ---------- */
+#shuffle-btn { color: var(--text-primary); opacity: 0.55; }
+#shuffle-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+#shuffle-btn:hover:not(:disabled) { opacity: 1; }
+#shuffle-btn.on { opacity: 1; background-color: var(--gold-detail); border-color: var(--gold-detail); color: #2b2d42; }
+
+/* ---------- 2. Queue button (title bar) with a small counter, and the panel ---------- */
+.tb-btn { position: relative; }
+.q-badge {
+  position: absolute; top: 0; right: 1px;
+  min-width: 15px; height: 15px; padding: 0 4px; border-radius: 8px;
+  background: var(--gold-detail); color: #2b2d42;
+  font-size: 9px; font-weight: bold; line-height: 15px; text-align: center;
+}
+.q-badge[hidden] { display: none; }
+
+.queue-panel {
+  display: none; flex: 1; min-height: 0; min-width: 0;
+  flex-direction: column; padding: 28px 40px 18px; overflow: hidden;
+}
+.content-section.queue-on .queue-panel { display: flex; }
+.content-section.queue-on #dynamic-content { display: none; }
+
+.q-clear {
+  flex-shrink: 0; align-self: flex-start; margin-top: 4px;
+  padding: 6px 14px; border-radius: 999px; border: 1px solid var(--accent-dark);
+  background: transparent; color: var(--text-primary);
+  font: inherit; font-size: 0.7rem; font-weight: bold; letter-spacing: 1.5px; cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+.q-clear:hover { background: var(--card-bg-hover); }
+.q-clear[hidden] { display: none; }
+
+.q-body { flex: 1; min-height: 0; overflow-y: auto; padding-right: 8px; }
+.q-body::-webkit-scrollbar { width: 6px; }
+.q-body::-webkit-scrollbar-thumb { background-color: var(--accent-color); border-radius: 10px; }
+html[data-theme="dark"] .q-body::-webkit-scrollbar-thumb { background-color: #56648a; }
+
+.q-section { margin: 18px 0 8px; font-size: 0.7rem; font-weight: bold; letter-spacing: 3px; opacity: 0.6; }
+.q-section:first-child { margin-top: 4px; }
+
+.q-row {
+  display: flex; align-items: center; gap: 12px; min-width: 0;
+  padding: 8px 12px; border-radius: 12px; border: 1px solid transparent;
+  cursor: pointer; transition: background-color 0.2s ease;
+}
+.q-row:hover { background: var(--card-bg-hover); }
+.q-cover { width: 44px; height: 44px; flex-shrink: 0; border-radius: 8px; object-fit: cover; background: var(--card-bg-hover); }
+.q-info { flex: 1; min-width: 0; }
+.q-title { font-weight: bold; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-artist { margin-top: 2px; font-size: 0.75rem; text-transform: uppercase; opacity: 0.75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.q-x {
+  flex-shrink: 0; width: 26px; height: 26px; border: none; border-radius: 50%;
+  background: transparent; color: inherit; font-size: 1.1rem; line-height: 1;
+  opacity: 0; cursor: pointer; transition: opacity 0.2s ease, background-color 0.2s ease;
+}
+.q-row:hover .q-x { opacity: 0.7; }
+.q-x:hover { opacity: 1 !important; background: rgba(0, 0, 0, 0.15); }
+.q-eq { flex-shrink: 0; font-size: 0.6rem; font-weight: bold; letter-spacing: 2px; color: var(--gold-detail); }
+
+.q-row.now { background: var(--text-primary); color: #f4f3ee; border-color: var(--gold-detail); cursor: default; }
+html[data-theme="dark"] .q-row.now { background: #4a5a96; color: #e8eaf4; }
+.q-more { text-align: center; padding: 10px; font-size: 0.8rem; opacity: 0.6; }
+
+/* ---------- 3. Play All / Shuffle buttons (playlist page + Home) ---------- */
+.playlist-header-actions { flex-wrap: wrap; gap: 12px 16px; }
+.pl-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+.playlist-header-actions .pl-actions { margin-top: 0; }
+.pl-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 18px; border-radius: 999px;
+  border: 2px solid var(--text-primary); background: var(--text-primary); color: var(--bg-home);
+  font: inherit; font-size: 0.8rem; font-weight: bold; letter-spacing: 1px; cursor: pointer;
+  transition: transform 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+}
+.pl-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pl-btn.play svg { fill: currentColor; }
+.pl-btn.ghost { background: transparent; color: var(--text-primary); }
+.pl-btn:hover:not(:disabled) { transform: translateY(-2px); }
+.pl-btn.ghost:hover:not(:disabled) { background: var(--text-primary); color: var(--bg-home); }
+.pl-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ---------- 4. "Add to queue" button on the song cards (inline icon: no new image needed) ---------- */
+.action-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.action-btn.queue-btn { color: var(--text-primary); }
+.song-card.now-playing-active .action-btn.queue-btn { color: #f4f3ee; }
+html[data-theme="dark"] .song-card.now-playing-active .action-btn.queue-btn { color: #e8eaf4; }
+
+/* ---------- 5. Small message at the bottom ("Added to queue") ---------- */
+.toast {
+  position: fixed; left: 50%; bottom: 28px; z-index: 300;
+  max-width: 70vw; padding: 10px 20px; border-radius: 999px;
+  background: #2b2d42; color: #f4f3ee; border: 1px solid var(--gold-detail);
+  font-size: 0.85rem; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  opacity: 0; transform: translate(-50%, 16px); pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+#queue-sub {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  margin-top: 6px; font-size: 0.85rem; letter-spacing: 0.3px;
+  text-transform: none; opacity: 0.9;
+}
+#queue-sub .q-time { color: var(--gold-detail); font-weight: bold; font-variant-numeric: tabular-nums; }
+#queue-sub .q-dot { opacity: 0.4; font-style: normal; }
+#queue-sub .q-chip {
+  padding: 2px 9px; border-radius: 999px; border: 1px solid var(--gold-detail);
+  color: var(--gold-detail); font-size: 0.62rem; font-weight: bold; letter-spacing: 1.5px;
+}
+
+.controls-frame {
+  position: static;
+  flex-direction: row; justify-content: space-between; align-items: center;
+  gap: 20px; width: 100%; box-sizing: border-box;
+  margin-top: 20px; padding: 12px 22px;
+}
+.controls-frame .time-display-inline { margin: 0; min-width: 120px; }
+
+.time-display-inline {
+  font-family: "Azeret Mono", monospace; font-weight: 700; font-size: 0.8rem;
+  letter-spacing: 0.5px; white-space: nowrap; opacity: 0.95;
+}
+.time-display-inline .t-total { font-weight: 300; opacity: 0.6; }
+/* ---------- One-line sliding titles: now-playing card, lyrics header, queue ---------- */
+.np-title {
+  display: block; -webkit-line-clamp: unset; -webkit-box-orient: initial;
+  white-space: nowrap; overflow: hidden;
+}
+.np-artist { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ly-head h2 { text-overflow: clip; }
+.mq { white-space: nowrap; overflow: hidden; }
+.mq .marq { display: inline-block; will-change: transform; }
+.mq.is-long {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10px, #000 calc(100% - 14px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 10px, #000 calc(100% - 14px), transparent);
+}
+.np-title.is-long .marq,
+.ly-head h2.is-long .marq,
+.q-row:hover .q-title.is-long .marq,
+.q-row.now .q-title.is-long .marq {
+  animation: marq var(--marq-dur, 6s) ease-in-out infinite alternate;
+}
+.q-title.mq { text-overflow: clip; }

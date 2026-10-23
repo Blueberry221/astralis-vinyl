@@ -25,8 +25,7 @@ document.addEventListener("contextmenu", (event) => {
 });
 
 /** Escapes text before it is placed inside innerHTML (prevents broken UI / injection). */
-const esc = (value) =>
-  String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const U = window.AstralisUtils; // from utils.js (loaded before this file)
 document.addEventListener("DOMContentLoaded", async () => {
   // ==========================================================================
@@ -50,6 +49,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     currentSong: null, // the song object currently loaded (used by lyrics)
     streamFallback: null, // set while streaming: called if the stream fails, to download instead
     waitingDownloadId: null, // song we are waiting on (full download) before it can play
+    shuffle: false,
+    baseList: [], // the playlist in its normal order (currentQueue is the order that is really played)
+    upNext: [], // songs added with "Add to queue": they play before the rest of the list
+    fromUpNext: false, // the song playing right now came from upNext
   };
 
   /** * Local Session Database
@@ -69,7 +72,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     token: 0, // increases on every search; results of older searches are ignored
     history: U.loadHistory(),
     cache: U.createCache(10 * 60 * 1000, 30), // same query within 10 min = instant
-    musicFails: 0, // after 2 failures in a row YouTube Music search is skipped for this session
   };
 
   /** * Lyrics panel state
@@ -175,7 +177,7 @@ document.addEventListener("DOMContentLoaded", async () => {
    * Commits the current DATABASE state to Rust backend.
    * @return {Promise<void>}
    */
-  const saveDatabase = async () => { 
+  const saveDatabase = async () => {
     try {
       await invoke("save_db", { data: JSON.stringify(DATABASE.userPlaylists) });
     } catch (err) {
@@ -261,15 +263,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   let prefetchingId = null;
   /** Quietly downloads the NEXT song of the queue so it starts instantly. */
   function prefetchNext() {
-    if (STATE.playContext === "search" || STATE.repeatMode === "one") return;
-    const queue = STATE.currentQueue;
-    if (!queue.length) return;
-    let index = STATE.currentSongIndex + 1;
-    if (index >= queue.length) {
-      if (STATE.repeatMode === "all") index = 0;
-      else return;
-    }
-    const next = queue[index];
+    if (STATE.repeatMode === "one") return;
+    const upcoming = peekNext();
+    const next = upcoming && upcoming.song;
     if (!next || next.id === STATE.currentSongId || STATE.localIds.has(next.id) || prefetchingId === next.id) return;
 
     prefetchingId = next.id;
@@ -307,6 +303,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     STATE.currentSong = song;
     STATE.streamFallback = null;
     STATE.waitingDownloadId = null;
+    refreshQueueUI();
 
     // 1. Crossfade Out UI
     DOM.npContainer.style.opacity = 0;
@@ -333,7 +330,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       let cover = song.thumbnail || song.cover || "";
       if (!cover && song.thumbnails && song.thumbnails.length > 0) cover = song.thumbnails[song.thumbnails.length - 1].url;
 
-      document.getElementById("np-title").textContent = title;
+      setMarquee(document.getElementById("np-title"), title);
       document.getElementById("np-artist").textContent = "Loading audio... ⏳";
       if (cover) {
         document.getElementById("np-cover").src = cover;
@@ -359,6 +356,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         // isPlaying / vinyl / play icon are updated by the audio "play" event listener
         setStatus(artist);
         commitRecent(song);
+        updateMediaSession(title, artist, cover);
       };
       const playFile = async (path, resumeAt = 0) => {
         DOM.audio.src = convertFileSrc(path);
@@ -368,7 +366,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             () => {
               DOM.audio.currentTime = resumeAt;
             },
-            { once: true }
+            { once: true },
           );
         }
         await DOM.audio.play();
@@ -456,6 +454,336 @@ document.addEventListener("DOMContentLoaded", async () => {
     }, 400);
   }
 
+    // ==========================================================================
+  // 4b. QUEUE, SHUFFLE, PLAY ALL
+  // ==========================================================================
+  // currentQueue = the order songs are really played (a copy of the list, shuffled when shuffle is on)
+  // baseList     = the same list in its normal order (used when shuffle is switched off)
+  // upNext       = songs added with "Add to queue": they always play first, then the list continues
+
+  const ICON = {
+    play: `<svg viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z" /></svg>`,
+    shuffle: `<svg viewBox="0 0 24 24"><path d="M16 3h5v5M4 20 21 3M21 16v5h-5M15 15l6 6M4 4l5 5" /></svg>`,
+    queueAdd: `<svg viewBox="0 0 24 24"><path d="M4 6h12M4 12h12M4 18h7M18 13v6M15 16h6" /></svg>`,
+  };
+  const SHUFFLE_KEY = "astralis_shuffle";
+  const shuffleBtn = document.getElementById("shuffle-btn");
+  const queueBtn = document.getElementById("queue-btn");
+  const queueBadge = document.getElementById("queue-badge");
+  const queueBody = document.getElementById("queue-body");
+  let queueOpen = false;
+
+  const titleOf = (s) => s.track || s.title || "Unknown Title";
+  const artistOf = (s) => s.artist || s.uploader || "";
+
+  let toastTimer = null;
+  function toast(text) {
+    let el = document.getElementById("toast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "toast";
+      el.className = "toast";
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 1800);
+  }
+
+  /** Copy of `list` in random order; the song with `firstId` (if any) is put first. */
+  function shuffled(list, firstId) {
+    const rest = list.filter((s) => s.id !== firstId);
+    for (let i = rest.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [rest[i], rest[j]] = [rest[j], rest[i]];
+    }
+    const first = list.find((s) => s.id === firstId);
+    return first ? [first, ...rest] : rest;
+  }
+
+  const canSkip = () => STATE.upNext.length > 0 || (STATE.playContext !== "search" && STATE.currentQueue.length > 0);
+
+  /** Which song comes next? {song, index, fromUpNext} or null. Changes nothing. */
+  function peekNext() {
+    if (STATE.upNext.length) return { song: STATE.upNext[0], index: -1, fromUpNext: true };
+    const q = STATE.currentQueue;
+    if (STATE.playContext === "search" || !q.length) return null;
+    let i = STATE.currentSongIndex + 1;
+    if (i >= q.length) {
+      if (STATE.repeatMode !== "all") return null;
+      i = 0;
+    }
+    return { song: q[i], index: i, fromUpNext: false };
+  }
+
+  /** Plays the next song (queued songs first). Returns false when there is none. */
+  function goNext() {
+    const n = peekNext();
+    if (!n) return false;
+    if (n.fromUpNext) {
+      STATE.upNext.shift(); // currentSongIndex stays: the list continues after the queued songs
+      STATE.fromUpNext = true;
+    } else {
+      STATE.currentSongIndex = n.index;
+      STATE.fromUpNext = false;
+    }
+    executePlay(n.song, false);
+    return true;
+  }
+
+  function goPrev() {
+    const q = STATE.currentQueue;
+    if (DOM.audio.currentTime > 3 || STATE.playContext === "search" || !q.length) {
+      DOM.audio.currentTime = 0; // more than 3s in (or no list): restart the song
+      return;
+    }
+    // while a queued song plays, "previous" goes back to the list song that came before it
+    let i = STATE.fromUpNext ? STATE.currentSongIndex : STATE.currentSongIndex - 1;
+    if (i < 0) i = STATE.repeatMode === "all" ? q.length - 1 : 0;
+    STATE.currentSongIndex = i;
+    STATE.fromUpNext = false;
+    executePlay(q[i], false);
+  }
+
+  /** A song was picked from a list: that list becomes the queue (shuffled if shuffle is on). */
+  function startQueue(list, song, playlistId) {
+    STATE.playContext = "playlist";
+    STATE.currentPlaylistId = playlistId;
+    STATE.baseList = list.slice();
+    STATE.currentQueue = STATE.shuffle ? shuffled(list, song.id) : list.slice();
+    STATE.currentSongIndex = STATE.currentQueue.findIndex((s) => s.id === song.id);
+    STATE.fromUpNext = false;
+    executePlay(song, playlistId === "downloaded");
+  }
+
+  /** "Play All" (wantShuffle false: in order) and "Shuffle" buttons. */
+  function playList(list, playlistId, wantShuffle) {
+    if (!list || !list.length) return;
+    applyShuffleFlag(wantShuffle);
+    const first = wantShuffle ? list[Math.floor(Math.random() * list.length)] : list[0];
+    startQueue(list, first, playlistId);
+  }
+
+  function applyShuffleFlag(on) {
+    STATE.shuffle = on;
+    shuffleBtn.classList.toggle("on", on);
+    shuffleBtn.setAttribute("aria-pressed", String(on));
+    try {
+      localStorage.setItem(SHUFFLE_KEY, on ? "1" : "0");
+    } catch {}
+  }
+
+  /** Shuffle button / S key: reorders what is left of the list, the song playing now stays put. */
+  function setShuffle(on, quiet = false) {
+    applyShuffleFlag(on);
+    const anchor = STATE.currentQueue[STATE.currentSongIndex];
+    if (STATE.currentQueue.length) {
+      const base = STATE.baseList.length ? STATE.baseList : STATE.currentQueue;
+      STATE.currentQueue = on ? shuffled(base, anchor && anchor.id) : base.slice();
+      STATE.currentSongIndex = anchor ? STATE.currentQueue.findIndex((s) => s.id === anchor.id) : -1;
+    }
+    refreshQueueUI();
+    if (!quiet) {
+      toast(on ? "Shuffle on" : "Shuffle off");
+      prefetchNext();
+    }
+  }
+
+  function restoreShuffle() {
+    let on = false;
+    try {
+      on = localStorage.getItem(SHUFFLE_KEY) === "1";
+    } catch {}
+    setShuffle(on, true);
+  }
+
+  /** "+" button on a card. Normal click: end of the queue. Shift+click: play next. */
+  function enqueue(song, atFront = false) {
+    const s = U.compactSong(song);
+    if (!STATE.currentSong) {
+      // nothing has been played yet: just play it
+      STATE.playContext = "none";
+      STATE.currentQueue = [];
+      STATE.baseList = [];
+      STATE.currentSongIndex = -1;
+      STATE.currentPlaylistId = null;
+      STATE.fromUpNext = false;
+      executePlay(s, false);
+      return;
+    }
+    if (STATE.upNext.length >= 200) {
+      toast("The queue is full (200 songs)");
+      return;
+    }
+    if (atFront) STATE.upNext.unshift(s);
+    else STATE.upNext.push(s);
+    toast(`${atFront ? "Playing next" : "Added to queue"}: ${titleOf(s)}`);
+    if (DOM.audio.ended) {
+      goNext(); // the list had finished: continue with the song just added
+      return;
+    }
+    refreshQueueUI();
+    prefetchNext();
+  }
+
+  /** A song was deleted from the playlist that is playing: take it out of the queue too. */
+  function dropFromQueue(id) {
+    const p = STATE.currentQueue.findIndex((s) => s.id === id);
+    if (p >= 0) {
+      STATE.currentQueue.splice(p, 1);
+      if (p <= STATE.currentSongIndex) STATE.currentSongIndex--;
+    }
+    STATE.baseList = STATE.baseList.filter((s) => s.id !== id);
+    STATE.upNext = STATE.upNext.filter((s) => s.id !== id);
+    refreshQueueUI();
+  }
+
+  function removeQueued(kind, i) {
+    if (kind === "up") {
+      STATE.upNext.splice(i, 1);
+    } else {
+      const gone = STATE.currentQueue.splice(i, 1)[0]; // rows of the list are always after the current song
+      if (gone) STATE.baseList = STATE.baseList.filter((s) => s.id !== gone.id);
+    }
+    refreshQueueUI();
+    prefetchNext();
+  }
+
+  // ---------- queue panel ----------
+  const QUEUE_LIST_MAX = 100;
+
+  function listName() {
+    if (STATE.currentPlaylistId === "recent") return "RECENT SONGS";
+    const pl = DATABASE.userPlaylists.find((p) => p.id === STATE.currentPlaylistId);
+    return (pl ? pl.name : "THE LIST").toUpperCase();
+  }
+
+  function queueRow(song, kind, i) {
+    const dur = U.formatDuration(song.duration);
+    const cover = song.thumbnail || song.cover || "";
+    return `<div class="q-row${kind === "now" ? " now" : ""}" data-kind="${kind}" data-i="${i}">
+      <img class="q-cover" src="${esc(cover)}" alt="" />
+      <div class="q-info"><div class="q-title mq" title="${esc(titleOf(song))}"><span class="marq">${esc(titleOf(song))}</span></div><div class="q-artist">${esc(artistOf(song))}${dur ? ` · ${dur}` : ""}</div></div>
+      ${kind === "now" ? `<span class="q-eq">PLAYING</span>` : `<button class="q-x" data-rm="1" title="Remove" aria-label="Remove from queue">×</button>`}
+    </div>`;
+  }
+
+  function fmtLeft(sec) {
+    const m = Math.max(1, Math.round(sec / 60));
+    return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+  }
+
+  function queueSubText() {
+    const cur = STATE.currentSong;
+    const after = STATE.playContext === "search" ? [] : STATE.currentQueue.slice(STATE.currentSongIndex + 1);
+    const all = [...STATE.upNext, ...after];
+    const curLeft = cur && isFinite(DOM.audio.duration)
+      ? DOM.audio.duration - DOM.audio.currentTime
+      : Number(cur && cur.duration) || 0;
+    const total = all.reduce((t, s) => t + (Number(s.duration) || 0), 0) + Math.max(curLeft, 0);
+    const missing = all.some((s) => !Number(s.duration));
+
+    const parts = [];
+    if (cur) parts.push(`<span>${all.length} ${all.length === 1 ? "song" : "songs"} up next</span>`);
+    if (cur && total) parts.push(`<span class="q-time">${missing ? "~" : ""}${fmtLeft(total)} left</span>`);
+
+    const flags = [
+      STATE.shuffle ? "SHUFFLE" : "",
+      STATE.repeatMode === "all" ? "REPEAT ALL" : STATE.repeatMode === "one" ? "REPEAT ONE" : "",
+    ].filter(Boolean);
+
+    return parts.join(`<i class="q-dot">·</i>`) + flags.map((f) => `<span class="q-chip">${f}</span>`).join("");
+  }
+
+  function renderQueue() {
+    const cur = STATE.currentSong;
+    const after = STATE.playContext === "search" ? [] : STATE.currentQueue.slice(STATE.currentSongIndex + 1);
+    const left = STATE.upNext.length + after.length;
+
+    let html = "";
+    if (cur) html += `<div class="q-section">NOW PLAYING</div>` + queueRow(cur, "now", 0);
+    if (STATE.upNext.length) {
+      html += `<div class="q-section">NEXT IN QUEUE · ${STATE.upNext.length}</div>`;
+      html += STATE.upNext.map((s, i) => queueRow(s, "up", i)).join("");
+    }
+    if (after.length) {
+      html += `<div class="q-section">NEXT FROM ${esc(listName())}${STATE.shuffle ? " · SHUFFLED" : ""}</div>`;
+      html += after.slice(0, QUEUE_LIST_MAX).map((s, k) => queueRow(s, "ctx", STATE.currentSongIndex + 1 + k)).join("");
+      if (after.length > QUEUE_LIST_MAX) html += `<div class="q-more">+ ${after.length - QUEUE_LIST_MAX} more</div>`;
+    }
+    if (!cur) {
+      html = `<div class="ly-msg"><p>Nothing is playing.</p><p class="hint">Use the + button on any song to add it here.</p></div>`;
+    } else if (!left) {
+      html += `<div class="ly-msg"><p>Nothing else is queued.</p><p class="hint">Use the + button on a song to add it. Shift+click plays it next.</p></div>`;
+    }
+
+    const top = queueBody.scrollTop;
+    queueBody.innerHTML = html;
+    queueBody.scrollTop = top;
+    requestAnimationFrame(() => fitMarquees(queueBody));
+
+    document.getElementById("queue-sub").innerHTML = queueSubText();
+    document.getElementById("queue-clear").hidden = STATE.upNext.length === 0;
+  }
+
+  /** Call after anything that changes the queue or the current song. */
+  function refreshQueueUI() {
+    const skip = canSkip();
+    DOM.btnNext.disabled = !skip;
+    DOM.btnPrev.disabled = !skip;
+    const n = STATE.upNext.length;
+    queueBadge.textContent = n > 99 ? "99+" : String(n);
+    queueBadge.hidden = n === 0;
+    if (queueOpen) renderQueue();
+    refreshMediaSkip();
+  }
+
+  function toggleQueue(force) {
+    queueOpen = typeof force === "boolean" ? force : !queueOpen;
+    if (queueOpen && LYRICS.open) toggleLyrics(false); // lyrics and queue share the same space
+    document.querySelector(".content-section").classList.toggle("queue-on", queueOpen);
+    queueBtn.classList.toggle("on", queueOpen);
+    if (queueOpen) renderQueue();
+  }
+
+  queueBtn.addEventListener("click", () => toggleQueue());
+  let lastQTick = -1;
+  DOM.audio.addEventListener("timeupdate", () => {
+    if (!queueOpen) return;
+    const tick = Math.floor(DOM.audio.currentTime / 15); // update every ~15 s
+    if (tick === lastQTick) return;
+    lastQTick = tick;
+    document.getElementById("queue-sub").innerHTML = queueSubText();
+  });
+  document.getElementById("queue-close").addEventListener("click", () => toggleQueue(false));
+  document.getElementById("queue-clear").addEventListener("click", () => {
+    STATE.upNext = [];
+    refreshQueueUI();
+  });
+  shuffleBtn.addEventListener("click", () => setShuffle(!STATE.shuffle));
+
+  queueBody.addEventListener("click", (e) => {
+    const row = e.target.closest(".q-row");
+    if (!row) return;
+    const kind = row.dataset.kind;
+    const i = Number(row.dataset.i);
+    if (e.target.closest("[data-rm]")) {
+      removeQueued(kind, i);
+    } else if (kind === "up") {
+      STATE.upNext.splice(0, i); // skipping ahead drops the queued songs before it
+      goNext();
+    } else if (kind === "ctx") {
+      STATE.currentSongIndex = i;
+      STATE.fromUpNext = false;
+      executePlay(STATE.currentQueue[i], false);
+    }
+  });
+  // inline onerror is blocked by the CSP, so a broken cover is hidden from here
+  queueBody.addEventListener("error", (e) => {
+    if (e.target.classList && e.target.classList.contains("q-cover")) e.target.style.display = "none";
+  }, true);
+
   // ==========================================================================
   // 5. LAYOUT & UI RENDERERS
   // ==========================================================================
@@ -476,20 +804,30 @@ document.addEventListener("DOMContentLoaded", async () => {
         DOM.dynamicContent.innerHTML = `
           <div class="playlist-header-actions">
             <div><h1 class="view-title">RECENT SONGS</h1><hr class="title-divider" style="margin-bottom:0;"/></div>
-            ${DATABASE.recentSongs.length ? `<button class="create-playlist-btn" id="clear-recent-btn">Clear all</button>` : ""}
+            ${
+              DATABASE.recentSongs.length
+                ? `<div class="pl-actions">
+                    <button class="pl-btn play" id="recent-play">${ICON.play} Play All</button>
+                    <button class="pl-btn ghost" id="recent-shuffle">${ICON.shuffle} Shuffle</button>
+                    <button class="create-playlist-btn" id="clear-recent-btn">Clear all</button>
+                  </div>`
+                : ""
+            }
           </div>
           <div class="playlist-container" id="recent-container"></div>
         `;
         renderPlaylistCards(DATABASE.recentSongs, document.getElementById("recent-container"), "home", "recent");
 
+        const recentPlay = document.getElementById("recent-play");
+        if (recentPlay) {
+          recentPlay.onclick = () => playList(DATABASE.recentSongs, "recent", false);
+          document.getElementById("recent-shuffle").onclick = () => playList(DATABASE.recentSongs, "recent", true);
+        }
+
         const clearBtn = document.getElementById("clear-recent-btn");
         if (clearBtn)
           clearBtn.onclick = async () => {
-            const ok = await customConfirm(
-              "Clear Recent Songs",
-              "Remove every song from this list? Your downloads and playlists are not affected.",
-              "Clear"
-            );
+            const ok = await customConfirm("Clear Recent Songs", "Remove every song from this list? Your downloads and playlists are not affected.", "Clear");
             if (!ok) return;
             DATABASE.recentSongs = [];
             persistRecent();
@@ -576,6 +914,10 @@ document.addEventListener("DOMContentLoaded", async () => {
               <h1 class="playlist-big-title">${esc(playlist.name)}</h1>
               <p class="playlist-big-desc">${esc(playlist.desc) || "No description."}</p>
               <div class="playlist-stats">${playlist.songs.length} songs</div>
+              <div class="pl-actions">
+                <button id="pl-play" class="pl-btn play"${playlist.songs.length ? "" : " disabled"}>${ICON.play} Play All</button>
+                <button id="pl-shuffle" class="pl-btn ghost"${playlist.songs.length ? "" : " disabled"}>${ICON.shuffle} Shuffle</button>
+              </div>
             </div>
           </div>
         </div>
@@ -594,6 +936,9 @@ document.addEventListener("DOMContentLoaded", async () => {
           renderPage("playlist");
         };
       }
+
+      document.getElementById("pl-play").onclick = () => playList(playlist.songs, playlist.id, false);
+      document.getElementById("pl-shuffle").onclick = () => playList(playlist.songs, playlist.id, true);
 
       renderPlaylistCards(playlist.songs, document.getElementById("playlist-detail-container"), "playlist", playlist.id);
       DOM.dynamicContent.style.opacity = 1;
@@ -628,13 +973,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       const downloadBtnHTML = `<button class="action-btn download-btn" title="${isDownloaded ? "Downloaded" : "Download (keep permanently)"}"><img src="assets/${isDownloaded ? "check" : "download"}.png"></button>`;
       const addBtnHTML = `<button class="action-btn add-btn" title="Add to playlist"><img src="assets/more.png"></button>`;
 
+      const queueBtnHTML = `<button class="action-btn queue-btn" title="Add to queue (Shift+click: play next)" aria-label="Add to queue">${ICON.queueAdd}</button>`;
       let actionButtonsHTML = "";
       if (viewContext === "search") {
-        actionButtonsHTML = downloadBtnHTML + addBtnHTML;
+        actionButtonsHTML = queueBtnHTML + downloadBtnHTML + addBtnHTML;
       } else if (viewContext === "home") {
-        actionButtonsHTML = downloadBtnHTML + addBtnHTML + `<button class="action-btn remove-recent-btn" title="Remove from recent"><img src="assets/close.png"></button>`;
+        actionButtonsHTML = queueBtnHTML + downloadBtnHTML + addBtnHTML + `<button class="action-btn remove-recent-btn" title="Remove from recent"><img src="assets/close.png"></button>`;
       } else {
-        actionButtonsHTML = `<button class="action-btn delete-btn"><img src="assets/delete.png"></button>`;
+        actionButtonsHTML = queueBtnHTML + `<button class="action-btn delete-btn"><img src="assets/delete.png"></button>`;
       }
 
       const card = document.createElement("div");
@@ -655,6 +1001,13 @@ document.addEventListener("DOMContentLoaded", async () => {
       card.querySelector(".song-cover").addEventListener("error", (e) => (e.target.style.display = "none"));
 
       // -- CARD ACTIONS BINDING --
+      const qBtn = card.querySelector(".queue-btn");
+      if (qBtn)
+        qBtn.onclick = (e) => {
+          e.stopPropagation();
+          enqueue(song, e.shiftKey);
+        };
+
       const dlBtn = card.querySelector(".download-btn");
       if (dlBtn) {
         if (isDownloaded) dlBtn.dataset.done = "1";
@@ -735,7 +1088,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           const ok = await customConfirm(
             fromDownloads ? "Delete Download" : "Remove Song",
             fromDownloads ? `Delete "${title}" from your device?` : `Remove "${title}" from this playlist?`,
-            fromDownloads ? "Delete" : "Remove"
+            fromDownloads ? "Delete" : "Remove",
           );
           if (!ok) return;
 
@@ -744,6 +1097,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           target.songs = target.songs.filter((s) => s.id !== song.id);
           await saveDatabase();
           card.remove();
+          if (STATE.currentPlaylistId === playlistId) dropFromQueue(song.id);
 
           // Stop and release the file first if this song is the one currently loaded
           if (STATE.currentSongId === song.id) {
@@ -753,10 +1107,13 @@ document.addEventListener("DOMContentLoaded", async () => {
             DOM.audio.removeAttribute("src");
             DOM.audio.load();
             STATE.currentQueue = [];
+            STATE.baseList = [];
+            STATE.currentSong = null;
             STATE.currentSongIndex = -1;
+            refreshQueueUI();
             DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
             DOM.timeDisplay.textContent = "00:00 / 00:00";
-            document.getElementById("np-title").textContent = "Welcome back~";
+            setMarquee(document.getElementById("np-title"), "Welcome back~");
             document.getElementById("np-artist").textContent = "Astralis Station";
             document.getElementById("np-cover").style.display = "none";
             document.getElementById("cover").style.display = "none";
@@ -775,23 +1132,22 @@ document.addEventListener("DOMContentLoaded", async () => {
 
       // Play Execution Trigger
       card.addEventListener("click", () => {
-        STATE.playContext = viewContext === "search" ? "search" : "playlist";
-        DOM.btnPrev.disabled = DOM.btnNext.disabled = STATE.playContext === "search";
-
-        if (STATE.playContext === "search") {
+        if (viewContext === "search") {
+          // a search result plays on its own (the songs you queued still follow it)
+          STATE.playContext = "search";
           STATE.repeatMode = "none";
           DOM.btnRepeat.style.opacity = "0.5";
           DOM.btnRepeat.querySelector("img").src = "assets/repeat.png";
           STATE.currentQueue = [];
+          STATE.baseList = [];
           STATE.currentSongIndex = -1;
           STATE.currentPlaylistId = null;
+          STATE.fromUpNext = false;
+          executePlay(song, false);
         } else {
           DOM.btnRepeat.style.cursor = "pointer";
-          STATE.currentQueue = data;
-          STATE.currentSongIndex = data.findIndex((s) => s.id === song.id);
-          STATE.currentPlaylistId = playlistId;
+          startQueue(data, song, playlistId); // this list becomes the queue
         }
-        executePlay(song, viewContext === "playlist" && playlistId === "downloaded");
       });
 
       container.appendChild(card);
@@ -802,12 +1158,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     requestAnimationFrame(() => fitMarquees(container));
   }
 
+  /** Put text in a one-line box that slides when it is too long (.mq) */
+  function setMarquee(el, text) {
+    if (!el) return;
+    el.classList.add("mq");
+    el.title = text;
+    el.innerHTML = "";
+    const s = document.createElement("span");
+    s.className = "marq";
+    s.textContent = text;
+    el.appendChild(s);
+    requestAnimationFrame(() => fitMarquees(el.parentElement || document));
+  }
+
   /**
    * Song titles stay on ONE line. A title that does not fit gets the class "is-long" and
    * the distance it must slide (--shift); CSS slides it while the card is hovered / playing.
    */
   function fitMarquees(root = document) {
-    root.querySelectorAll(".song-title").forEach((box) => {
+    root.querySelectorAll(".song-title, .mq").forEach((box) => {
       const inner = box.firstElementChild;
       if (!inner) return;
       const overflow = inner.offsetWidth - box.clientWidth;
@@ -824,28 +1193,24 @@ document.addEventListener("DOMContentLoaded", async () => {
   // ==========================================================================
 
   const skeletonHTML = (count = 6) =>
-    Array.from(
-      { length: count },
-      () => `<div class="skeleton-card"><div class="sk-cover"></div><div class="sk-lines"><div class="sk-line w70"></div><div class="sk-line w40"></div></div></div>`
-    ).join("");
+    Array.from({ length: count }, () => `<div class="skeleton-card"><div class="sk-cover"></div><div class="sk-lines"><div class="sk-line w70"></div><div class="sk-line w40"></div></div></div>`).join(
+      "",
+    );
 
-  const friendlySearchError = (err) =>
-    /failed to run yt-dlp/i.test(String(err))
-      ? "The search engine (yt-dlp) could not start."
-      : "Search failed. Check your internet connection and try again.";
+  const friendlySearchError = (err) => (/failed to run yt-dlp/i.test(String(err)) ? "The search engine (yt-dlp) could not start." : "Search failed. Check your internet connection and try again.");
 
-async function fetchSongs(query) {
-  const key = query.toLowerCase();
-  const cached = SEARCH.cache.get(key);
-  if (cached) return cached;
+  async function fetchSongs(query) {
+    const key = query.toLowerCase();
+    const cached = SEARCH.cache.get(key);
+    if (cached) return cached;
 
-  // YouTube Music flat results have no artist field, so use normal YouTube search.
-  const raw = await invoke("search_song", { query, source: "youtube" });
-  const results = U.processSearch(raw, "youtube", query);
+    // YouTube Music flat results have no artist field, so use normal YouTube search.
+    const raw = await invoke("search_song", { query, source: "youtube" });
+    const results = U.processSearch(raw, "youtube", query);
 
-  if (results.length > 0) SEARCH.cache.set(key, results);
-  return results;
-}
+    if (results.length > 0) SEARCH.cache.set(key, results);
+    return results;
+  }
 
   /** Draws the search results area from SEARCH.status. Safe to call when the tab is not open. */
   function paintSearch() {
@@ -864,12 +1229,15 @@ async function fetchSongs(query) {
         renderPlaylistCards(SEARCH.results, box, "search");
       }
     } else {
-      box.innerHTML = `<div class="search-state"><p>Search for a song or an artist.</p><p class="hint">Songs first: YouTube Music is searched before regular YouTube.</p></div>`;
+      box.innerHTML = `<div class="search-state"><p>Search for a song or an artist.</p><p class="hint">Tip: press / anywhere to jump to this box.</p></div>`;
     }
   }
 
   async function doSearch(rawQuery) {
-    const query = String(rawQuery || "").trim().replace(/\s+/g, " ").slice(0, 200);
+    const query = String(rawQuery || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .slice(0, 200);
     if (!query) return;
     if (SEARCH.status === "loading" && SEARCH.query.toLowerCase() === query.toLowerCase()) return; // already running
 
@@ -922,7 +1290,7 @@ async function fetchSongs(query) {
       <div class="sh-chips">${items
         .map(
           (h) =>
-            `<span class="sh-chip" data-q="${esc(h)}"><span class="sh-text">${esc(h)}</span><button class="sh-x" data-del="${esc(h)}" aria-label="Remove ${esc(h)} from history" title="Remove">×</button></span>`
+            `<span class="sh-chip" data-q="${esc(h)}"><span class="sh-text">${esc(h)}</span><button class="sh-x" data-del="${esc(h)}" aria-label="Remove ${esc(h)} from history" title="Remove">×</button></span>`,
         )
         .join("")}</div>`;
   }
@@ -971,43 +1339,11 @@ async function fetchSongs(query) {
   let volumeClickTimeout = null;
   let volumeClickCount = 0;
 
-  DOM.volumeBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    volumeClickCount++;
+  DOM.btnPlay.addEventListener("click", () => togglePlayback());
 
-    if (volumeClickCount === 1) {
-      volumeClickTimeout = setTimeout(() => {
-        DOM.volumeContainer.classList.toggle("active");
-        volumeClickCount = 0;
-      }, 250);
-    } else if (volumeClickCount === 2) {
-      clearTimeout(volumeClickTimeout);
-      volumeClickCount = 0;
-
-      if (DOM.audio.volume > 0) {
-        // Proses Mute
-        STATE.previousVolume = DOM.audio.volume;
-        DOM.audio.volume = 0;
-        DOM.volumeSlider.value = 0;
-        DOM.volumeIcon.src = "assets/no-volume.png";
-      } else {
-        // Proses Unmute (Kembali ke volume awal)
-        DOM.audio.volume = STATE.previousVolume || 1;
-        DOM.volumeSlider.value = DOM.audio.volume;
-        DOM.volumeIcon.src = "assets/max-volume.png";
-      }
-    }
-  });
-
-  DOM.volumeSlider.addEventListener("input", (e) => {
-    DOM.audio.volume = e.target.value;
-    if (DOM.audio.volume == 0) {
-      DOM.volumeIcon.src = "assets/no-volume.png";
-    } else {
-      DOM.volumeIcon.src = "assets/max-volume.png";
-      STATE.previousVolume = DOM.audio.volume;
-    }
-  });
+  DOM.volumeSlider.addEventListener("input", (e) => applyVolume(e.target.value));
+  DOM.volumeBtn.addEventListener("click", () => DOM.volumeContainer.classList.toggle("active"));
+  DOM.volumeBtn.addEventListener("dblclick", () => toggleMute()); // optional: double-click mutes
 
   document.addEventListener("click", (e) => {
     if (DOM.volumeContainer && !DOM.volumeContainer.contains(e.target)) {
@@ -1043,31 +1379,9 @@ async function fetchSongs(query) {
     document.getElementById("np-artist").textContent = "❌ Failed to play";
   });
 
-  DOM.btnNext.addEventListener("click", () => {
-    if (STATE.playContext === "search" || STATE.currentQueue.length === 0) return;
-    let nextIndex = STATE.currentSongIndex + 1;
-    if (nextIndex >= STATE.currentQueue.length) {
-      if (STATE.repeatMode === "all") nextIndex = 0;
-      else return;
-    }
-    STATE.currentSongIndex = nextIndex;
-    executePlay(STATE.currentQueue[nextIndex], STATE.currentPlaylistId === "downloaded");
-  });
+  DOM.btnNext.addEventListener("click", () => goNext());
 
-  DOM.btnPrev.addEventListener("click", () => {
-    if (STATE.playContext === "search" || STATE.currentQueue.length === 0) return;
-    if (DOM.audio.currentTime > 3) {
-      DOM.audio.currentTime = 0;
-      return;
-    }
-    let prevIndex = STATE.currentSongIndex - 1;
-    if (prevIndex < 0) {
-      if (STATE.repeatMode === "all") prevIndex = STATE.currentQueue.length - 1;
-      else prevIndex = 0;
-    }
-    STATE.currentSongIndex = prevIndex;
-    executePlay(STATE.currentQueue[prevIndex], STATE.currentPlaylistId === "downloaded");
-  });
+  DOM.btnPrev.addEventListener("click", () => goPrev());
 
   DOM.btnRepeat.addEventListener("click", () => {
     if (STATE.playContext === "search") return;
@@ -1088,6 +1402,7 @@ async function fetchSongs(query) {
   });
 
   DOM.audio.addEventListener("timeupdate", () => {
+    DOM.timeDisplay.innerHTML = `${formatTime(DOM.audio.currentTime)}<span class="t-total"> / ${formatTime(DOM.audio.duration)}</span>`;
     if (DOM.audio.duration) {
       const percent = DOM.audio.currentTime / DOM.audio.duration;
       DOM.progressRing.style.strokeDashoffset = MAX_OFFSET - percent * (MAX_OFFSET / 4);
@@ -1102,21 +1417,8 @@ async function fetchSongs(query) {
     if (STATE.repeatMode === "one") {
       DOM.audio.currentTime = 0;
       DOM.audio.play().catch(console.error);
-    } else if (STATE.playContext !== "search" && STATE.currentQueue.length > 0) {
-      let nextIndex = STATE.currentSongIndex + 1;
-      if (nextIndex >= STATE.currentQueue.length) {
-        if (STATE.repeatMode === "all") {
-          STATE.currentSongIndex = 0;
-          executePlay(STATE.currentQueue[0], STATE.currentPlaylistId === "downloaded");
-        } else {
-          DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
-        }
-      } else {
-        STATE.currentSongIndex = nextIndex;
-        executePlay(STATE.currentQueue[nextIndex], STATE.currentPlaylistId === "downloaded");
-      }
-    } else {
-      DOM.progressRing.style.strokeDashoffset = MAX_OFFSET;
+    } else if (!goNext()) {
+      DOM.progressRing.style.strokeDashoffset = MAX_OFFSET; // nothing left to play
     }
   });
 
@@ -1255,8 +1557,7 @@ async function fetchSongs(query) {
     }
   };
 
-  const onClick = (id, fn) =>
-    document.getElementById(id).addEventListener("click", () => Promise.resolve(fn()).catch(console.error));
+  const onClick = (id, fn) => document.getElementById(id).addEventListener("click", () => Promise.resolve(fn()).catch(console.error));
   onClick("win-min", () => appWindow?.minimize());
   onClick("win-max", async () => {
     await appWindow?.toggleMaximize();
@@ -1293,9 +1594,7 @@ async function fetchSongs(query) {
       return;
     }
     lyricsBody.className = `ly-body ${data.synced ? "synced" : "plain"}`;
-    lyricsBody.innerHTML = data.lines
-      .map((line, i) => `<p class="ly-line${line.text ? "" : " ly-gap"}" data-i="${i}">${esc(line.text || "♪")}</p>`)
-      .join("");
+    lyricsBody.innerHTML = data.lines.map((line, i) => `<p class="ly-line${line.text ? "" : " ly-gap"}" data-i="${i}">${esc(line.text || "♪")}</p>`).join("");
     document.getElementById("lyrics-tag").textContent = data.synced ? "SYNCED" : "TEXT ONLY";
     lyricsBody.scrollTop = 0;
     syncLyrics(true);
@@ -1318,29 +1617,33 @@ async function fetchSongs(query) {
   }
 
   /** One request to LRCLIB. Returns the parsed JSON, or null when nothing was found. */
-async function lrclib(path, params, retries = 1) {
-  const url = new URL(`https://lrclib.net/api/${path}`);
-  Object.entries(params).forEach(([k, v]) => v && url.searchParams.set(k, v));
+  async function lrclib(path, params, retries = 1) {
+    const url = new URL(`https://lrclib.net/api/${path}`);
+    Object.entries(params).forEach(([k, v]) => v && url.searchParams.set(k, v));
 
-  for (let attempt = 0; ; attempt++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 8000);
-    try {
-      const res = await fetch(url, { signal: controller.signal });
-      if (res.status === 404) return null;
-      if (res.status >= 400 && res.status < 500 && res.status !== 429) return null; // bad query = "nothing found"
-      if (!res.ok) { const e = new Error(`LRCLIB HTTP ${res.status}`); e.kind = "server"; throw e; }
-      return await res.json();
-    } catch (err) {
-      if (!err.kind) err.kind = err.name === "AbortError" ? "timeout" : "network";
-      console.warn("LRCLIB", path, err.kind, err.message);   // helps you see what's failing
-      if (err.kind === "server" || attempt >= retries) throw err;   // don't retry server errors / 429
-      await new Promise((r) => setTimeout(r, 800));
-    } finally {
-      clearTimeout(timer);
+    for (let attempt = 0; ; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        if (res.status === 404) return null;
+        if (res.status >= 400 && res.status < 500 && res.status !== 429) return null; // bad query = "nothing found"
+        if (!res.ok) {
+          const e = new Error(`LRCLIB HTTP ${res.status}`);
+          e.kind = "server";
+          throw e;
+        }
+        return await res.json();
+      } catch (err) {
+        if (!err.kind) err.kind = err.name === "AbortError" ? "timeout" : "network";
+        console.warn("LRCLIB", path, err.kind, err.message); // helps you see what's failing
+        if (err.kind === "server" || attempt >= retries) throw err; // don't retry server errors / 429
+        await new Promise((r) => setTimeout(r, 800));
+      } finally {
+        clearTimeout(timer);
+      }
     }
   }
-}
 
   async function fetchLyrics(song) {
     const { tracks, artists, full } = U.lyricsCandidates(song);
@@ -1368,12 +1671,7 @@ async function lrclib(path, params, retries = 1) {
     }
 
     // 2. search fallback (song length must match, so wrong songs are filtered out)
-    const searches = [
-      artists[0] ? { q: `${artists[0]} ${tracks[0]}` } : null,
-      { q: tracks[0] },
-      tracks[1] ? { q: tracks[1] } : null,
-      full !== tracks[0] ? { q: full } : null,
-    ].filter(Boolean);
+    const searches = [artists[0] ? { q: `${artists[0]} ${tracks[0]}` } : null, { q: tracks[0] }, tracks[1] ? { q: tracks[1] } : null, full !== tracks[0] ? { q: full } : null].filter(Boolean);
     for (const params of searches) {
       try {
         const record = U.pickLyrics(await lrclib("search", params, 0), duration);
@@ -1391,12 +1689,12 @@ async function lrclib(path, params, retries = 1) {
 
   async function loadLyrics(song) {
     if (!song) {
-      document.getElementById("lyrics-title").textContent = "No song playing";
+      setMarquee(document.getElementById("lyrics-title"), "No song playing");
       document.getElementById("lyrics-artist").textContent = "";
       setLyricsMessage("Play a song to see its lyrics.");
       return;
     }
-    document.getElementById("lyrics-title").textContent = song.track || song.title || "";
+    setMarquee(document.getElementById("lyrics-title"), song.track || song.title || "");
     document.getElementById("lyrics-artist").textContent = song.artist || song.uploader || "";
 
     if (LYRICS.songId === song.id && LYRICS.data) {
@@ -1431,6 +1729,7 @@ async function lrclib(path, params, retries = 1) {
 
   function toggleLyrics(force) {
     LYRICS.open = typeof force === "boolean" ? force : !LYRICS.open;
+    if (LYRICS.open && queueOpen) toggleQueue(false);
     contentSection.classList.toggle("lyrics-on", LYRICS.open);
     lyricsBtn.classList.toggle("on", LYRICS.open);
     if (LYRICS.open) loadLyrics(STATE.currentSong);
@@ -1438,9 +1737,6 @@ async function lrclib(path, params, retries = 1) {
 
   lyricsBtn.addEventListener("click", () => toggleLyrics());
   document.getElementById("lyrics-close").addEventListener("click", () => toggleLyrics(false));
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && LYRICS.open) toggleLyrics(false);
-  });
   // Click a synced line to jump to it
   lyricsBody.addEventListener("click", (e) => {
     const line = e.target.closest(".ly-line");
@@ -1470,12 +1766,8 @@ async function lrclib(path, params, retries = 1) {
   }
 
   function toggleMute() {
-    if (DOM.audio.volume > 0) {
-      STATE.previousVolume = DOM.audio.volume;
-      applyVolume(0);
-    } else {
-      applyVolume(STATE.previousVolume || 1);
-    }
+    if (DOM.audio.volume > 0) applyVolume(0);
+    else applyVolume(STATE.previousVolume || 1);
   }
 
   function restoreVolume() {
@@ -1518,11 +1810,15 @@ async function lrclib(path, params, retries = 1) {
         artwork: cover ? [{ src: cover, sizes: "512x512" }] : [],
       });
     } catch {}
-    // Search results have no queue, so hide prev/next there
-    const canSkip = STATE.playContext !== "search" && STATE.currentQueue.length > 1;
+    refreshMediaSkip();
+  }
+
+  /** Prev / next media keys only exist while there is something to skip to. */
+  function refreshMediaSkip() {
+    if (!MS) return;
     try {
-      MS.setActionHandler("previoustrack", canSkip ? () => DOM.btnPrev.click() : null);
-      MS.setActionHandler("nexttrack", canSkip ? () => DOM.btnNext.click() : null);
+      MS.setActionHandler("previoustrack", DOM.btnPrev.disabled ? null : () => DOM.btnPrev.click());
+      MS.setActionHandler("nexttrack", DOM.btnNext.disabled ? null : () => DOM.btnNext.click());
     } catch {}
   }
 
@@ -1537,9 +1833,13 @@ async function lrclib(path, params, retries = 1) {
 
   if (MS) {
     const on = (action, fn) => {
-      try { MS.setActionHandler(action, fn); } catch {}
+      try {
+        MS.setActionHandler(action, fn);
+      } catch {}
     };
-    on("play", () => { if (DOM.audio.paused) togglePlayback(); });
+    on("play", () => {
+      if (DOM.audio.paused) togglePlayback();
+    });
     on("pause", () => DOM.audio.pause());
     on("seekbackward", (d) => seekBy(-(d.seekOffset || 10)));
     on("seekforward", (d) => seekBy(d.seekOffset || 10));
@@ -1564,10 +1864,7 @@ async function lrclib(path, params, retries = 1) {
     if (!force && now - lastSave < 5000) return;
     lastSave = now;
     try {
-      localStorage.setItem(
-        SESSION_KEY,
-        JSON.stringify({ song: U.compactSong(song), position, ctx: STATE.playContext, playlistId: STATE.currentPlaylistId })
-      );
+      localStorage.setItem(SESSION_KEY, JSON.stringify({ song: U.compactSong(song), position, ctx: STATE.playContext, playlistId: STATE.currentPlaylistId }));
     } catch {}
   }
 
@@ -1586,7 +1883,9 @@ async function lrclib(path, params, retries = 1) {
   DOM.audio.addEventListener("pause", () => saveSession(true));
   DOM.audio.addEventListener("seeked", () => saveSession(true));
   DOM.audio.addEventListener("ended", () => saveSession(true, 0)); // finished: next launch starts it from the top
-  document.addEventListener("visibilitychange", () => { if (document.hidden) saveSession(true); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) saveSession(true);
+  });
   window.addEventListener("pagehide", () => saveSession(true));
 
   function startResume() {
@@ -1599,8 +1898,11 @@ async function lrclib(path, params, retries = 1) {
 
   /** Shows the last song (paused, nothing downloaded yet). The first Play press loads it and jumps to the position. */
   function restoreSession() {
+    DOM.timeDisplay.innerHTML = `${formatTime(position)}<span class="t-total"> / ${formatTime(duration)}</span>`;
     let s = null;
-    try { s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null"); } catch {}
+    try {
+      s = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
+    } catch {}
     if (!s || !s.song || !s.song.id) return;
     const song = s.song;
 
@@ -1614,12 +1916,13 @@ async function lrclib(path, params, retries = 1) {
       queue = Array.isArray(list) ? list : [];
     }
     const index = queue.findIndex((x) => x.id === song.id);
-    STATE.currentQueue = index >= 0 ? queue : [];
+    STATE.currentQueue = index >= 0 ? queue.slice() : [];
+    STATE.baseList = STATE.currentQueue.slice();
     STATE.currentSongIndex = index;
     STATE.currentPlaylistId = index >= 0 ? s.playlistId : null;
     DOM.btnPrev.disabled = DOM.btnNext.disabled = STATE.playContext === "search" || index < 0;
 
-    document.getElementById("np-title").textContent = song.title || "Unknown Title";
+    setMarquee(document.getElementById("np-title"), song.title || "Unknown Title");
     document.getElementById("np-artist").textContent = song.artist || "Unknown Artist";
     if (song.thumbnail) {
       document.getElementById("np-cover").src = song.thumbnail;
@@ -1649,16 +1952,15 @@ async function lrclib(path, params, retries = 1) {
     });
 
   const isTextField = (el) =>
-    !!el &&
-    (el.isContentEditable ||
-      el.tagName === "TEXTAREA" ||
-      el.tagName === "SELECT" ||
-      (el.tagName === "INPUT" && !/^(range|checkbox|radio|button|submit|file|color)$/i.test(el.type)));
+    !!el && (el.isContentEditable || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || (el.tagName === "INPUT" && !/^(range|checkbox|radio|button|submit|file|color)$/i.test(el.type)));
 
   function focusSearch() {
     const go = () => {
       const input = document.getElementById("search-input");
-      if (input) { input.focus(); input.select(); }
+      if (input) {
+        input.focus();
+        input.select();
+      }
       return !!input;
     };
     if (go()) return;
@@ -1675,10 +1977,20 @@ async function lrclib(path, params, retries = 1) {
     // Esc closes one layer at a time: modal -> typing -> volume popup -> lyrics
     if (e.key === "Escape") {
       const modal = openModal();
-      if (modal) { document.getElementById(modal[1]).click(); return; }
-      if (isTextField(e.target)) { e.target.blur(); return; }
-      if (DOM.volumeContainer.classList.contains("active")) { DOM.volumeContainer.classList.remove("active"); return; }
+      if (modal) {
+        document.getElementById(modal[1]).click();
+        return;
+      }
+      if (isTextField(e.target)) {
+        e.target.blur();
+        return;
+      }
+      if (DOM.volumeContainer.classList.contains("active")) {
+        DOM.volumeContainer.classList.remove("active");
+        return;
+      }
       if (LYRICS.open) toggleLyrics(false);
+      else if (queueOpen) toggleQueue(false);
       return;
     }
 
@@ -1694,6 +2006,12 @@ async function lrclib(path, params, retries = 1) {
         if (e.target.type === "range") return; // the volume slider keeps its own arrow keys
         e.preventDefault();
         seekBy(e.code === "ArrowLeft" ? -5 : 5);
+        break;
+      case "KeyS":
+        if (!e.repeat) setShuffle(!STATE.shuffle);
+        break;
+      case "KeyQ":
+        if (!e.repeat) toggleQueue();
         break;
       case "KeyN":
         if (!e.repeat) DOM.btnNext.click();
@@ -1733,6 +2051,7 @@ async function lrclib(path, params, retries = 1) {
       DOM.navItems.forEach((nav) => nav.classList.remove("active"));
       item.classList.add("active");
       toggleLyrics(false); // leaving the lyrics view when a tab is chosen
+      toggleQueue(false);
       renderPage(item.getAttribute("data-target"));
     });
   });
@@ -1788,6 +2107,11 @@ async function lrclib(path, params, retries = 1) {
   if (!DATABASE.userPlaylists.some((p) => p.id === "downloaded")) {
     DATABASE.userPlaylists.unshift({ id: "downloaded", name: "Downloaded", desc: "Permanently downloaded songs", songs: [] });
   }
+
+  restoreVolume(); // saved volume
+  restoreSession(); // last song (paused) + position
+  restoreShuffle(); // saved shuffle on / off
+  refreshQueueUI();
 
   await refreshLocalIds();
 
